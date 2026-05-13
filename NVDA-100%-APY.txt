@@ -1,0 +1,77 @@
+strategy("EMA RSI Trend");
+
+const emaFastLen = input.int(9, 'EMA Fast', { minval: 2, maxval: 100 });
+const emaSlowLen = input.int(21, 'EMA Slow', { minval: 2, maxval: 200 });
+const emaTrendLen = input.int(50, 'EMA Trend (VWAP proxy)', { minval: 10, maxval: 200 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 100 });
+const rsiLongEntry = input.float(50, 'RSI Long Entry', { minval: 30, maxval: 70, step: 1 });
+const rsiShortEntry = input.float(50, 'RSI Short Entry', { minval: 30, maxval: 70, step: 1 });
+const rsiLongExit = input.float(45, 'RSI Long Exit', { minval: 20, maxval: 60, step: 1 });
+const rsiShortExit = input.float(55, 'RSI Short Exit', { minval: 40, maxval: 80, step: 1 });
+const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 100 });
+const atrSlMult = input.float(1.5, 'ATR SL Mult', { minval: 0.5, maxval: 5.0, step: 0.1 });
+const atrTpMult = input.float(3.0, 'ATR TP Mult', { minval: 0.5, maxval: 10.0, step: 0.1 });
+const baseMarginPct = input.float(100, 'Base Margin %', { minval: 1, maxval: 100, step: 1 });
+
+const emaFast = ta.ema(close, emaFastLen);
+const emaSlow = ta.ema(close, emaSlowLen);
+const emaTrend = ta.ema(close, emaTrendLen);
+const rsi = ta.rsi(close, rsiLen);
+const atr = ta.atr(atrLen);
+
+if (!isFinite(+emaFast) || !isFinite(+emaSlow) || !isFinite(+emaTrend) || !isFinite(+rsi) || !isFinite(+atr)) return null;
+
+const volOk = +volume > 0;
+
+const crossUp = ta.crossover(emaFast, emaSlow);
+const crossDown = ta.crossunder(emaFast, emaSlow);
+
+const longEntry = crossUp && +rsi > rsiLongEntry && +close > +emaTrend && volOk;
+const shortEntry = crossDown && +rsi < rsiShortEntry && +close < +emaTrend && volOk;
+
+const longExit = crossDown || +rsi < rsiLongExit;
+const shortExit = crossUp || +rsi > rsiShortExit;
+
+const pos = strategy.position_size;
+const prevPos = state.prevPos === undefined ? 0 : state.prevPos;
+
+if (+pos > 0 && longExit) {
+  strategy.close('L', { reasoning: 'EMA cross down or RSI weak' });
+}
+if (+pos < 0 && shortExit) {
+  strategy.close('S', { reasoning: 'EMA cross up or RSI strong' });
+}
+
+if (+pos <= 0 && longEntry) {
+  strategy.entry('L', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'EMA9>EMA21 cross, RSI>50, price>EMA50',
+  });
+}
+if (+pos >= 0 && shortEntry) {
+  strategy.entry('S', 'short', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'EMA9<EMA21 cross, RSI<50, price<EMA50',
+  });
+}
+
+const justEnteredLong = +strategy.position_size > 0 && prevPos <= 0;
+const justEnteredShort = +strategy.position_size < 0 && prevPos >= 0;
+
+if (justEnteredLong) {
+  const entryPx = +strategy.position_avg_price;
+  const sl = entryPx - atrSlMult * +atr;
+  const tp = entryPx + atrTpMult * +atr;
+  strategy.exit('XL', 'L', { stop: sl, limit: tp, reasoning: '1.5x ATR SL / 3x ATR TP' });
+}
+if (justEnteredShort) {
+  const entryPx = +strategy.position_avg_price;
+  const sl = entryPx + atrSlMult * +atr;
+  const tp = entryPx - atrTpMult * +atr;
+  strategy.exit('XS', 'S', { stop: sl, limit: tp, reasoning: '1.5x ATR SL / 3x ATR TP' });
+}
+
+state.prevPos = +strategy.position_size;
+return null;
