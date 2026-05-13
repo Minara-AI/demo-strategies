@@ -1,0 +1,74 @@
+;(() => {
+  // strategy("MU Long Momentum", overlay=true, pyramiding=1)
+  const emaLen = input.int(20, 'EMA Length', { minval: 5, maxval: 100 });
+  const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 50 });
+  const rsiLongTh = input.int(50, 'RSI Long Threshold', { minval: 40, maxval: 70 });
+  const macdFast = input.int(12, 'MACD Fast', { minval: 2, maxval: 50 });
+  const macdSlow = input.int(26, 'MACD Slow', { minval: 5, maxval: 100 });
+  const macdSig = input.int(9, 'MACD Signal', { minval: 2, maxval: 50 });
+  const slPct = input.float(2.0, 'Stop-Loss %', { minval: 0.1, maxval: 10.0, step: 0.1 });
+  const tpPct = input.float(5.0, 'Take-Profit %', { minval: 0.1, maxval: 20.0, step: 0.1 });
+  const trailActPct = input.float(3.0, 'Trail Activate %', { minval: 0.1, maxval: 10.0, step: 0.1 });
+  const trailOffsetPct = input.float(1.5, 'Trail Offset %', { minval: 0.1, maxval: 10.0, step: 0.1 });
+
+  const baseMarginPct = 100; // 100% equity margin (aggressive); notional = 100% * leverage
+
+  const emaVal = ta.ema(close, emaLen);
+  const rsiVal = ta.rsi(close, rsiLen);
+  const macd = ta.macd(close, macdFast, macdSlow, macdSig);
+
+  if (!isFinite(+emaVal) || !isFinite(+rsiVal) || !isFinite(+macd.macd) || !isFinite(+macd.signal)) return null;
+
+  // Track prev RSI for crossover above static threshold
+  const prevRsi = state.prevRsi;
+  state.prevRsi = +rsiVal;
+  const rsiCrossUp = prevRsi !== undefined && prevRsi <= rsiLongTh && +rsiVal > rsiLongTh;
+
+  // Track prev close vs EMA for breakout cross
+  const prevClose = state.prevClose;
+  const prevEma = state.prevEma;
+  state.prevClose = +close;
+  state.prevEma = +emaVal;
+  const priceBreakUp = prevClose !== undefined && prevEma !== undefined && prevClose <= prevEma && +close > +emaVal;
+
+  // Three-factor alignment: all bullish AND at least one freshly triggered this bar
+  const priceAboveEma = +close > +emaVal;
+  const rsiBullish = +rsiVal > rsiLongTh;
+  const macdBullish = +macd.macd > +macd.signal;
+  const macdCrossUp = ta.crossover(macd.macd, macd.signal);
+
+  const longTrigger = priceAboveEma && rsiBullish && macdBullish && (priceBreakUp || rsiCrossUp || macdCrossUp);
+
+  const pos = strategy.position_size;
+  const prevPos = state.prevPos ?? 0;
+  const inLong = pos > 1e-9;
+  const flat = !inLong;
+
+  if (flat && longTrigger) {
+    strategy.entry('L', 'long', {
+      qty: baseMarginPct * strategy.leverage,
+      qty_type: 'percent_of_equity',
+      reasoning: 'EMA breakout up + RSI>' + rsiLongTh + ' + MACD bull (>=1 fresh)',
+    });
+  }
+
+  // Place SL/TP/Trailing only on entry bar (avoid stacking; C13)
+  const justEnteredLong = pos > 1e-9 && prevPos <= 0;
+  if (justEnteredLong) {
+    const entryPx = +strategy.position_avg_price;
+    const slPx = entryPx * (1 - slPct / 100);
+    const tpPx = entryPx * (1 + tpPct / 100);
+    const trailActPx = entryPx * (1 + trailActPct / 100);
+    const trailOffsetTicks = Math.max(1, Math.round((entryPx * trailOffsetPct / 100) / syminfo.mintick));
+    strategy.exit('XL', 'L', {
+      stop: slPx,
+      limit: tpPx,
+      trail_price: trailActPx,
+      trail_offset: trailOffsetTicks,
+      reasoning: 'SL 2% / TP 5% / Trail activate +3% offset 1.5%',
+    });
+  }
+
+  state.prevPos = pos;
+  return null;
+})();

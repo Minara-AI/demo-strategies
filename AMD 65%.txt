@@ -1,0 +1,120 @@
+;(() => {
+  strategy('AMD Momentum Trend', { overlay: true, pyramiding: 1 });
+
+  // ===== Inputs =====
+  const emaFastLen = input.int(20, 'EMA Fast', { minval: 2, maxval: 100 });
+  const emaSlowLen = input.int(50, 'EMA Slow', { minval: 5, maxval: 200 });
+  const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 100 });
+  const rsiLongTh = input.int(55, 'RSI Long Threshold', { minval: 50, maxval: 95 });
+  const rsiShortTh = input.int(45, 'RSI Short Threshold', { minval: 5, maxval: 50 });
+  const macdFast = input.int(12, 'MACD Fast', { minval: 2, maxval: 100 });
+  const macdSlow = input.int(26, 'MACD Slow', { minval: 5, maxval: 100 });
+  const macdSignal = input.int(9, 'MACD Signal', { minval: 2, maxval: 50 });
+  const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 100 });
+  const slMult = input.float(1.5, 'Stop ATR Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+  const tpMult = input.float(3.0, 'TP ATR Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+  const trailMult = input.float(2.0, 'Trail ATR Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+  const baseMarginPct = input.float(20, 'Base Margin %', { minval: 0.1, maxval: 100, step: 0.1 });
+
+  // ===== Indicators =====
+  const emaFast = ta.ema(close, emaFastLen);
+  const emaSlow = ta.ema(close, emaSlowLen);
+  const rsi = ta.rsi(close, rsiLen);
+  const macd = ta.macd(close, macdFast, macdSlow, macdSignal);
+  const atr = ta.atr(atrLen);
+
+  // Validity
+  if (!isFinite(+emaFast) || !isFinite(+emaSlow) || !isFinite(+rsi) || !isFinite(+macd.macd) || !isFinite(+macd.signal) || !isFinite(+atr)) {
+    return null;
+  }
+
+  // ===== Signals =====
+  const trendUp = +close > +emaSlow && +emaFast > +emaSlow;
+  const trendDown = +close < +emaSlow && +emaFast < +emaSlow;
+  const rsiCrossUp = ta.crossover(rsi, rsiLongTh);
+  const rsiCrossDown = ta.crossunder(rsi, rsiShortTh);
+  const macdBull = +macd.macd > +macd.signal;
+  const macdBear = +macd.macd < +macd.signal;
+
+  const longSignal = trendUp && rsiCrossUp && macdBull;
+  const shortSignal = trendDown && rsiCrossDown && macdBear;
+
+  // ===== State init =====
+  if (state.prevPos === undefined) state.prevPos = 0;
+  if (state.entryPrice === undefined) state.entryPrice = 0;
+  if (state.entryAtr === undefined) state.entryAtr = 0;
+  if (state.trailArmed === undefined) state.trailArmed = false;
+
+  const pos = +strategy.position_size;
+  const prevPos = +state.prevPos;
+
+  // ===== Entries =====
+  if (longSignal) {
+    strategy.entry('Long', 'long', {
+      qty: baseMarginPct * strategy.leverage,
+      qty_type: 'percent_of_equity',
+      reasoning: 'Trend up + RSI cross up + MACD bull',
+    });
+  } else if (shortSignal) {
+    strategy.entry('Short', 'short', {
+      qty: baseMarginPct * strategy.leverage,
+      qty_type: 'percent_of_equity',
+      reasoning: 'Trend down + RSI cross down + MACD bear',
+    });
+  }
+
+  // Detect just-entered (cross from flat/opposite to current side)
+  const justEnteredLong = pos > 0 && prevPos <= 0;
+  const justEnteredShort = pos < 0 && prevPos >= 0;
+
+  if (justEnteredLong) {
+    state.entryPrice = +strategy.position_avg_price;
+    state.entryAtr = +atr;
+    state.trailArmed = false;
+    const sl = +state.entryPrice - slMult * +state.entryAtr;
+    const tp = +state.entryPrice + tpMult * +state.entryAtr;
+    strategy.exit('XL', 'Long', { stop: sl, limit: tp, reasoning: 'Initial ATR SL/TP long' });
+  }
+
+  if (justEnteredShort) {
+    state.entryPrice = +strategy.position_avg_price;
+    state.entryAtr = +atr;
+    state.trailArmed = false;
+    const sl = +state.entryPrice + slMult * +state.entryAtr;
+    const tp = +state.entryPrice - tpMult * +state.entryAtr;
+    strategy.exit('XS', 'Short', { stop: sl, limit: tp, reasoning: 'Initial ATR SL/TP short' });
+  }
+
+  // ===== Trailing stop activation once in profit =====
+  if (pos > 0 && !state.trailArmed && +close >= +state.entryPrice + +state.entryAtr) {
+    strategy.cancel('XL');
+    const trailTicks = Math.max(1, Math.round((trailMult * +state.entryAtr) / syminfo.mintick));
+    strategy.exit('XL', 'Long', {
+      trail_price: +close,
+      trail_offset: trailTicks,
+      reasoning: 'Arm ATR trailing stop long',
+    });
+    state.trailArmed = true;
+  }
+
+  if (pos < 0 && !state.trailArmed && +close <= +state.entryPrice - +state.entryAtr) {
+    strategy.cancel('XS');
+    const trailTicks = Math.max(1, Math.round((trailMult * +state.entryAtr) / syminfo.mintick));
+    strategy.exit('XS', 'Short', {
+      trail_price: +close,
+      trail_offset: trailTicks,
+      reasoning: 'Arm ATR trailing stop short',
+    });
+    state.trailArmed = true;
+  }
+
+  // Reset on flat
+  if (pos === 0 && prevPos !== 0) {
+    state.entryPrice = 0;
+    state.entryAtr = 0;
+    state.trailArmed = false;
+  }
+
+  state.prevPos = pos;
+  return null;
+})();
