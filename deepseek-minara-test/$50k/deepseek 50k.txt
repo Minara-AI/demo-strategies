@@ -1,0 +1,153 @@
+//@version=6
+strategy("BTC 4h FVG/iFVG Strategy [50k, Maker/Taker]",
+     overlay=true,
+     initial_capital=50000,
+     default_qty_type=strategy.cash,
+     default_qty_value=50000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.045,           // Exits use market orders (taker)
+     slippage=2)
+
+// ==========================================================================
+// 1. INPUTS & PARAMETERS
+// ==========================================================================
+risk_percent       = input.float(1.0, "Risk per trade (%)") / 100   // 1% of $50k = $500
+atr_mult_sl        = input.float(1.5, "ATR multiplier for SL")
+rr_ratio           = input.float(2.0, "Risk:Reward ratio (RR)")
+ema_short_len      = input.int(50, "EMA short length")
+ema_long_len       = input.int(200, "EMA long length")
+rsi_len            = input.int(14, "RSI length")
+vol_mult           = input.float(1.2, "Volume multiplier (above SMA)")
+fvg_min_width_pct  = input.float(0.3, "Min FVG width (%)") / 100
+
+// ==========================================================================
+// 2. INDICATORS
+// ==========================================================================
+ema_short = ta.ema(close, ema_short_len)
+ema_long  = ta.ema(close, ema_long_len)
+rsi       = ta.rsi(close, rsi_len)
+vol_sma   = ta.sma(volume, 20)
+atr       = ta.atr(14)
+
+// Trend direction
+trend_up   = close > ema_long and ema_short > ema_long
+trend_down = close < ema_long and ema_short < ema_long
+
+// Volume confirmation
+volume_ok = volume > vol_sma * vol_mult
+
+// ==========================================================================
+// 3. FVG DETECTION (3‑candle pattern)
+// ==========================================================================
+// Bullish FVG:
+//   Candle1 high < Candle3 low  (gap)
+//   Middle candle can be any colour
+bullish_fvg = high[2] < low[0] and not na(low[0]) and not na(high[2])
+// Bearish FVG (inverse = iFVG):
+//   Candle1 low > Candle3 high
+bearish_fvg = low[2] > high[0] and not na(high[0]) and not na(low[2])
+
+// FVG price levels
+var float fvg_buy_zone  = na
+var float fvg_sell_zone = na
+var int   fvg_bar_index  = 0
+
+if bullish_fvg
+    fvg_buy_zone   := high[2]            // Upper boundary of the gap? Actually the gap is between high[2] and low[0]. Price enters zone when low <= high[2]? Standard: fill occurs when price touches the gap. Use upper limit = high[2] (lower limit = low[0]). Entry on crossing into zone.
+    fvg_bar_index := bar_index
+if bearish_fvg
+    fvg_sell_zone  := low[2]            // Lower boundary of bearish gap (gap between low[2] and high[0])
+    fvg_bar_index := bar_index
+
+// Only consider fresh FVGs (last 20 bars) to avoid stale zones
+fvg_fresh = bar_index - fvg_bar_index <= 20
+
+// Minimum gap width requirement
+fvg_width_bull = bullish_fvg ? low[0] - high[2] : na
+fvg_width_bear = bearish_fvg ? low[2] - high[0] : na
+min_width = close * fvg_min_width_pct
+valid_bull_fvg = bullish_fvg and (low[0] - high[2]) >= min_width
+valid_bear_fvg = bearish_fvg and (low[2] - high[0]) >= min_width
+
+// ==========================================================================
+// 4. ENTRY CONDITIONS
+// ==========================================================================
+// LONG: Price touches/enters the bullish FVG zone, uptrend, RSI > 30 (not oversold), volume ok
+enter_long = valid_bull_fvg and fvg_fresh and trend_up and rsi > 30 and volume_ok
+
+// SHORT: Price touches/enters the bearish FVG zone, downtrend, RSI < 70 (not overbought), volume ok
+enter_short = valid_bear_fvg and fvg_fresh and trend_down and rsi < 70 and volume_ok
+
+// ==========================================================================
+// 5. POSITION SIZING (1% risk of $50k)
+// ==========================================================================
+risk_capital = strategy.initial_capital * risk_percent   // $500
+
+// For LONG: stop loss = entry - atr * atr_mult_sl
+// Position size (BTC) = risk_capital / (entry - stopLoss)
+position_size_long(entry_price) =>
+    stop_loss = entry_price - (atr * atr_mult_sl)
+    if (entry_price - stop_loss) > 0
+        risk_capital / (entry_price - stop_loss)
+    else
+        0
+
+// For SHORT: stop loss = entry + atr * atr_mult_sl
+position_size_short(entry_price) =>
+    stop_loss = entry_price + (atr * atr_mult_sl)
+    if (stop_loss - entry_price) > 0
+        risk_capital / (stop_loss - entry_price)
+    else
+        0
+
+// ==========================================================================
+// 6. EXIT CONDITIONS (ATR‑based TP/SL)
+// ==========================================================================
+long_tp_price  = strategy.position_avg_price + (atr * atr_mult_sl * rr_ratio)
+long_sl_price  = strategy.position_avg_price - (atr * atr_mult_sl)
+short_tp_price = strategy.position_avg_price - (atr * atr_mult_sl * rr_ratio)
+short_sl_price = strategy.position_avg_price + (atr * atr_mult_sl)
+
+// ==========================================================================
+// 7. ORDER EXECUTION (Limit entries for maker fee, market exits)
+// ==========================================================================
+if enter_long and strategy.position_size == 0
+    entry_price = low[0] > fvg_buy_zone ? low[0] : fvg_buy_zone   // Buy just inside the FVG or at current low
+    size = position_size_long(entry_price)
+    if size > 0
+        // Limit order – qualifies for maker fee (0.015%)
+        strategy.order("Long Entry", strategy.long, qty=size, limit=entry_price,
+                       comment="Bullish FVG")
+
+if enter_short and strategy.position_size == 0
+    entry_price = high[0] < fvg_sell_zone ? high[0] : fvg_sell_zone
+    size = position_size_short(entry_price)
+    if size > 0
+        strategy.order("Short Entry", strategy.short, qty=size, limit=entry_price,
+                       comment="Bearish iFVG")
+
+// Exits – market orders (taker fee 0.045%)
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long Entry", stop=long_sl_price, limit=long_tp_price)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short Entry", stop=short_sl_price, limit=short_tp_price)
+
+// ==========================================================================
+// 8. VISUAL AIDS (optional – plots FVG zones, EMAs, ATR)
+// ==========================================================================
+plot(ema_short, "EMA 50", color=color.new(color.orange, 0), linewidth=1)
+plot(ema_long,  "EMA 200", color=color.new(color.blue, 0), linewidth=2)
+
+bgcolor(enter_long ? color.new(color.green, 85) : na)
+bgcolor(enter_short ? color.new(color.red, 85) : na)
+
+// Display FVG zones as boxes (only the most recent)
+var box fvg_box = na
+if valid_bull_fvg and fvg_fresh
+    box.delete(fvg_box)
+    fvg_box := box.new(bar_index, high[2], bar_index+1, low[0],
+                       bgcolor=color.new(color.green, 80), border_color=color.green)
+if valid_bear_fvg and fvg_fresh
+    box.delete(fvg_box)
+    fvg_box := box.new(bar_index, low[2], bar_index+1, high[0],
+                       bgcolor=color.new(color.red, 80), border_color=color.red)

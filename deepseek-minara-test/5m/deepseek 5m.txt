@@ -1,0 +1,99 @@
+//@version=5
+strategy("BTC 4H Institutional Trend", overlay=true,
+     initial_capital=5000000, default_qty_type=strategy.cash,
+     commission_type=strategy.commission.percent, commission_value=0.045, // taker fee
+     pyramiding=1, currency=currency.USD)
+
+// ----- Inputs -----
+emaFastLen      = input.int(21,  "Fast EMA", minval=5)
+emaSlowLen      = input.int(55,  "Slow EMA", minval=10)
+rsiLen          = input.int(14,  "RSI Length")
+rsiThreshold    = input.int(50,  "RSI Threshold", minval=20, maxval=80)
+adxLen          = input.int(14,  "ADX Length")
+adxThreshold    = input.int(20,  "ADX Threshold", minval=10)
+volSmooth       = input.int(20,  "Volume MA Length")
+atrLen          = input.int(14,  "ATR Length")
+stopATRMult     = input.float(2.0, "Stop ATR multiplier", step=0.1)
+riskPerc        = input.float(1.0, "Risk per trade (%)", step=0.1, minval=0.1, maxval=5)
+takeProfitMult  = input.float(1.5, "Take profit risk multiple", step=0.1)
+trailATRMult    = input.float(3.0, "Trailing stop ATR multiplier (after partial)", step=0.1)
+
+// ----- Indicators -----
+emaFast   = ta.ema(close, emaFastLen)
+emaSlow   = ta.ema(close, emaSlowLen)
+rsi       = ta.rsi(close, rsiLen)
+adx       = ta.adx(high, low, close, adxLen)
+volAvg    = ta.sma(volume, volSmooth)
+atrValue  = ta.atr(atrLen)
+
+// ----- Trade signals -----
+// Entry: Fast EMA crosses over Slow EMA AND RSI > threshold AND ADX > threshold AND volume > average
+bullishCross = ta.crossover(emaFast, emaSlow)
+validRsi     = rsi > rsiThreshold
+validAdx     = adx > adxThreshold
+validVol     = volume > volAvg
+longCondition = bullishCross and validRsi and validAdx and validVol
+
+// ----- Position management variables -----
+var float entryPrice   = na
+var float stopPrice    = na
+var float targetPrice  = na
+var float highestHigh  = na
+var bool  partialDone  = false
+
+// When a new long trade is entered
+if (longCondition and strategy.position_size == 0)
+    entryPrice  := close
+    // Stop loss distance in price (ATR based)
+    stopDist    = atrValue * stopATRMult
+    stopPrice   := entryPrice - stopDist
+    // Take profit target for partial exit
+    targetPrice := entryPrice + stopDist * takeProfitMult
+    partialDone := false
+    highestHigh := entryPrice
+
+    // Calculate position size so that the loss equals riskPerc% of equity
+    riskAmount   = strategy.equity * riskPerc / 100
+    // Quantity in BTC = riskAmount / stop distance
+    qtyBTC       = riskAmount / stopDist
+    // Cash value needed = qtyBTC * entryPrice
+    cashOrder    = qtyBTC * entryPrice
+    // Cap at equity
+    cashOrder    := math.min(cashOrder, strategy.equity)
+    strategy.entry("Long", strategy.long, qty=cashOrder)
+
+// ----- Exit Conditions -----
+longIsActive = strategy.position_size > 0
+
+// Bearish exit (fast crosses under slow)
+bearishCross = ta.crossunder(emaFast, emaSlow)
+
+// Update trailing highest high while in trade (only after partial profit)
+if (longIsActive)
+    highestHigh := math.max(highestHigh, high)
+
+// Trailing stop trigger
+trailStopPrice = highestHigh - atrValue * trailATRMult
+// Only activate trailing stop after the partial profit target is reached
+if (high >= targetPrice and not partialDone)
+    partialDone := true
+    // Move stop to breakeven immediately
+    stopPrice := entryPrice
+
+if (partialDone)
+    stopPrice := math.max(stopPrice, trailStopPrice)
+
+// ----- Order Execution -----
+// 1. Partial take profit (50% of position) when price reaches target
+if (strategy.position_size > 0 and high >= targetPrice and not partialDone)
+    strategy.close("Long", qty_percent=50, comment="Partial TP 50%")
+
+// 2. Stop loss or trailing stop exit for the remaining position
+if (longIsActive and (low <= stopPrice or bearishCross))
+    strategy.close("Long", comment="Exit")
+
+// ----- Plotting -----
+plot(emaFast, color=color.blue, linewidth=2)
+plot(emaSlow, color=color.red, linewidth=2)
+plot(stopPrice, style=plot.style_circles, color=color.red, title="Stop")
+plot(targetPrice, style=plot.style_circles, color=color.green, title="Target")

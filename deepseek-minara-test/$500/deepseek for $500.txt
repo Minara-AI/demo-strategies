@@ -1,0 +1,202 @@
+//@```
+//@version=version=55
+strategy
+strategy("BTC("BTC  4H4H FVG FVG Strategy", Strategy", overlay overlay=true,=true, 
+  
+  commission_type commission_type=str=strategy.comategy.commission.mission.percent,percent, commission_value commission_value==00.015.015,, 
+  default 
+  default_qty_qty_type_type=strategy=strategy.cash.cash, default, default_q_qtyty_value=_value=10001000,, 
+  
+  initial initial_capital_capital=100=1000,0, currency= currency=currency.currency.USDUSD)
+
+// Input)
+
+// Inputss
+risk_per
+risk_percentcent = = input.float input.float(2(2.0.0, ", "Risk per trade (%)Risk per trade (%)", min", minval=val=0.0.11,, maxval maxval=10=10, step, step=0=0.1.1)
+stop_buffer)
+stop_buffer = input = input.float(.float(0.0.5,5, "Stop "Stop buffer buffer (%)", minval (%)", minval==00.0.0, max, maxvalval==5,5, step= step=0.0.1)1) /  / 100100
+rr_
+rr_ratio =ratio = input.float input.float(2(2.0.0,, "Risk:Reward ratio", "Risk:Reward ratio", minval minval==11.0.0, max, maxval=val=5,5, step= step=0.0.11)
+
+// Variables)
+
+// Variables to to store store F FVG stateVG state
+var
+var bool bull bool bullFVGFVG_active =_active = false false
+var float
+var float bull_top bull_top = na = na
+var
+var float bull float bull_bottom_bottom = na = na
+var
+var float bull_mid float bull_mid = na = na
+var
+var string bull string bull_order_id_order_id = " = ""
+
+var"
+
+var bool bear bool bearFVGFVG_active =_active = false
+var float false
+var float bear_top bear_top = na = na
+var
+var float bear float bear_bottom_bottom = na = na
+var
+var float bear float bear_mid_mid = na = na
+
+varvar string bear string bear_order_id_order_id = " = ""
+
+//"
+
+// Detect Bull Detect Bullish Fish FVG:VG: gap gap up up where where low low[1][1] > high > high[3[3] (] (3-c3-candle patternandle pattern)
+bull)
+bullFVGFVG__conditioncondition = low = low[1[1] >] > high high[3][3] and close and close[1[1] >] > open open[1[1]
+
+// Detect]
+
+// Detect Bearish Bearish FVG FVG: gap: gap down where down where high high[1[1]] < low < low[3[]
+bear3FVG]
+bear_conditionFVG_condition = high = high[1[1]] < low < low[3] and close[3] and close[1[1]] < < open open[1[1]
+
+// On]
+
+// On new bullish new bullish F FVGVG, cancel, cancel any any previous previous bull bull order order and set and set new one new one
+if
+if bullF bullFVGVG__conditioncondition
+    //
+    // Cancel existing Cancel existing bull order bull order if any if any
+   
+    if bull if bullFFVG_activeVG_active and bull and bull_order_id_order_id != != ""
+        strategy ""
+        strategy.cancel.cancel(bull(bull_order_id_order_id)
+   )
+    bull bullFVGFVG_active :=_active := true true
+    bull
+    bull_top :=_top := low low[1[1]
+    bull]
+    bull_bottom_bottom := high := high[[33]
+]
+    bull_m    bull_mid :=id := math. math.avg(bavg(bull_topull_top, bull, bull_b_bottomottom)
+   )
+    // Calculate // Calculate position position size based size based on risk on risk
+   
+    risk_c risk_capital =apital = strategy.e strategy.eququityity * risk * risk_percent_percent /  / 100100
+    stop_loss
+    stop_loss_price_price = bull = bull_bottom_bottom * ( * (11 - - stop_buffer stop_buffer) )  // stop // stop just just below F below FVGVG bottom bottom
+   
+    stop_distance stop_distance = bull = bull_mid_mid - stop - stop_loss_price_loss_price
+   
+    qty qty = risk = risk_capital_capital / stop / stop_distance_distance
+    if
+    if qty qty >  > 00
+        bull
+        bull_order_id_order_id := " := "BullFBullFVG_L"VG_L" + + str.t str.tostringostring(bar(bar_index_index)
+       )
+        strategy strategy.order(b.order(bull_orderull_order_id,_id, strategy.l strategy.long,ong, limit=b limit=bullull_m_midid,, qty qty=qty=qty, comment, comment="F="FVG Long")
+
+// Mitigation for bullish FVG Long")
+
+// Mitigation for bullish FVG:VG: if price if price closes closes above the above the top of top of the the F FVG,VG, consider consider filled filled/m/mitigateditigated, cancel, cancel pending buy pending buy order order
+if
+if bull bullFFVG_activeVG_active and not and not na na(bull(bull_top)_top) and close and close > bull > bull_top_top
+
+    if    if bull_order bull_order_id !=_id != ""
+        ""
+        strategy.cancel strategy.cancel(b(bull_orderull_order_id_id)
+    bullFVG)
+    bullFVG_active :=_active := false false
+    bull
+    bull_top_top := na := na
+   
+    bull_b bull_bottom :=ottom := na na
+    bull
+    bull_mid := na_mid := na
+   
+    bull_order bull_order_id :=_id := " ""
+
+// On"
+
+// On new bear new bearish Fish FVGVG
+if bear
+if bearFVGF_conditionVG
+   _condition if
+    bear if bearFVGFVG_active and_active and bear_order bear_order_id !=_id != ""
+        ""
+        strategy.c strategy.cancel(bancel(bear_orderear_order_id_id)
+    bear)
+    bearFVGFVG_active :=_active := true true
+    bear
+    bear_top_top := := low low[3[3]
+    bear]
+    bear_bottom_bottom := high := high[1[1]
+   ]
+    bear_m bear_mid :=id := math. math.avg(bavg(bear_topear_top, bear, bear_bottom_bottom)
+   )
+    risk_capital = risk_capital = strategy.e strategy.equityquity * risk * risk_percent_percent /  / 100100
+    stop
+    stop_loss_price_loss_price = bear = bear_top *_top * (1 + stop_buffer (1 + stop_buffer)  // stop just)  // stop just above F above FVG topVG top
+   
+    stop stop_distance_distance = stop = stop_loss_price_loss_price - bear - bear_mid_mid
+   
+    qty qty = risk = risk_capital_capital / stop / stop_distance_distance
+    if
+    if qty qty >  > 00
+        bear
+        bear_order_id_order_id := " := "BearFBearFVG_SVG_S" +" + str.t str.tostringostring(bar_index)
+        strategy(bar_index)
+        strategy.order(bear_order_id,.order(bear_order_id, strategy.short strategy.short, limit, limit=bear=bear_mid_mid, q, qty=qty=qty,ty, comment=" comment="FFVGVG Short Short")
+
+// Mit")
+
+// Mitigation forigation for bearish bearish FVG FVG: close: close below the below the bottom bottom
+if bear
+if bearFVGFVG_active and_active and not na not na(bear(bear_bottom_bottom) and) and close close < bear_b < bear_bottomottom
+    if
+    if bear_order bear_order_id !=_id != ""
+ ""
+               strategy.c strategy.cancel(bancel(bear_orderear_order_id_id)
+    bear)
+    bearFVGFVG_active :=_active := false false
+    bear
+    bear_top :=_top := na na
+    bear
+    bear_bottom_bottom := na := na
+   
+    bear_m bear_mid :=id := na na
+    bear
+    bear_order_id_order_id := " := ""
+
+//"
+
+// Manage exits Manage exits after entry after entry: we: we need to need to attach stop attach stop and and take profit take profit to filled to filled orders orders.
+// When order.
+// When order is is filled, filled, Trading TradingView'sView's strategy.exit strategy.exit works works on on trade trade. We'll add. We'll add conditional conditional exits exits.
+// Strategy.exit must.
+// Strategy.exit must be called on be called on the the same bar same bar as entry as entry fill fill.. We'll We'll use an use an approach approach:
+//:
+// Check if Check if we are we are in in a a long trade long trade with no with no exit exit yet. yet. We'll We'll track entry track entry price price using using strategy strategy.op.opentradesentrades.
+//.
+// Sim Simplerpler: use: use strategy.exit strategy.exit in in the global the global scope with scope with stop stop and and limit referencing limit referencing position position. But. But we need we need dynamic dynamic levels levels.
+//.
+// We'll We'll set stop set stop and take and take profit when profit when an entry an entry occurs occurs. Use. Use strategy.position strategy.position_avg_avg_price_price.
+// After.
+// After a a long entry long entry, we, we can set can set exit exit orders orders.
+//.
+// Strategy.exit Strategy.exit allows allows using using "from_entry" "from_entry" parameter. We'll assign parameter. We'll assign a a name to name to entry order entry order like bull like bull_order_id_order_id.
+//.
+// So we So we'll issue'll issue strategy strategy.exit.exit("TP("TP/SL/SL Long", from_entry=b Long", from_entry=bull_orderull_order_id, stop_id, stop==stop_lossstop_loss_price,_price, limit=t limit=take_proake_profit_pricefit_price) when) when the order the order is placed is placed?
+// But?
+// But we we don don't know't know if if it will it will fill. fill. Pine Pine allows allows placing placing exit orders exit orders that will that will only activate only activate when when the entry the entry fills fills. So. So we can we can place them place them simultaneously simultaneously.
+.
+// So// So when we when we place the place the limit entry limit entry order, order, we also we also place exit place exit orders with orders with the same the same from_entry from_entry ID ID. That. That way, way, if entry if entry fills, fills, exits will exits will be pending be pending.
+//.
+// So modify So modify:: directly directly after strategy after strategy.order for.order for long long, add, add:
+:
+// strategy// strategy.exit(".exit("Exit LongExit Long "+ "+bull_orderbull_order_id,_id, bull_order bull_order_id,_id, stop= stop=stop_lossstop_loss_price,_price, limit=t limit=take_proake_profit_pricefit_price)
+//)
+// We must We must compute take compute take_profit_profit_price:_price: bull_m bull_mid +id + (bull (bull_mid_mid - stop - stop_loss_price_loss_price)*)*rrrr_ratio_ratio.
+//.
+// Similarly for Similarly for short.
+ short.
+// We must store the stop and// We must store the stop and take profit take profit values values;; they need they need to be to be fixed. fixed. We'll We'll use those use those in the in the exit exit.
+//.
+// This simplifies: we don't need to This simplifies: we don't need to later later manage manage exits exits.

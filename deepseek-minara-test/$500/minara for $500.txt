@@ -1,0 +1,136 @@
+// strategy("BTC FVG Edge", overlay=true, initial_capital=10000, pyramiding=1)
+
+// Inputs
+const riskPercent = input.float(2.0, 'Risk per trade (%)', { minval: 0.1, maxval: 10, step: 0.1 });
+const stopBufferPct = input.float(0.5, 'Stop buffer (%)', { minval: 0.0, maxval: 5, step: 0.1 });
+const rrRatio = input.float(2.0, 'Risk:Reward ratio', { minval: 1.0, maxval: 5, step: 0.1 });
+
+const stopBuffer: number = stopBufferPct / 100;
+
+// Initialize persistent FVG state (Pine `var` semantics)
+if (state.bullFVG_active === undefined) state.bullFVG_active = false;
+if (state.bull_top === undefined) state.bull_top = NaN;
+if (state.bull_bottom === undefined) state.bull_bottom = NaN;
+if (state.bull_mid === undefined) state.bull_mid = NaN;
+if (state.bull_order_id === undefined) state.bull_order_id = '';
+
+if (state.bearFVG_active === undefined) state.bearFVG_active = false;
+if (state.bear_top === undefined) state.bear_top = NaN;
+if (state.bear_bottom === undefined) state.bear_bottom = NaN;
+if (state.bear_mid === undefined) state.bear_mid = NaN;
+if (state.bear_order_id === undefined) state.bear_order_id = '';
+
+// Pull fixed historical values (Pine close[1], low[1], high[3], low[3], open[1], high[1])
+const low1 = +low.at(1);
+const high1 = +high.at(1);
+const close1 = +close.at(1);
+const open1 = +open.at(1);
+const high3 = +high.at(3);
+const low3 = +low.at(3);
+
+// Need enough history before evaluating patterns
+if (!isFinite(low1) || !isFinite(high1) || !isFinite(close1) || !isFinite(open1) || !isFinite(high3) || !isFinite(low3)) {
+  return null;
+}
+
+// Detect Bullish FVG: gap up where low[1] > high[3] (3-candle pattern)
+const bullFVG_condition: boolean = low1 > high3 && close1 > open1;
+
+// Detect Bearish FVG: gap down where high[1] < low[3]
+const bearFVG_condition: boolean = high1 < low3 && close1 < open1;
+
+// On new bullish FVG, cancel any previous bull order and set new one
+if (bullFVG_condition) {
+  if (state.bullFVG_active && state.bull_order_id !== '') {
+    strategy.cancel(state.bull_order_id);
+  }
+
+  state.bullFVG_active = true;
+  state.bull_top = low1;
+  state.bull_bottom = high3;
+  state.bull_mid = (state.bull_top + state.bull_bottom) / 2;
+
+  // Entry at far edge (bottom of bullish FVG) for deeper retracement
+  const entry_price: number = state.bull_bottom;
+  const stop_loss_price: number = state.bull_bottom * (1 - stopBuffer);
+  const stop_distance: number = entry_price - stop_loss_price;
+  const risk_capital: number = strategy.equity * riskPercent / 100;
+  const qty: number = stop_distance > 0 ? risk_capital / stop_distance : 0;
+
+  if (qty > 0) {
+    state.bull_order_id = 'BullFVG_L' + str.tostring(bar_index);
+    const take_profit_price: number = entry_price + (entry_price - stop_loss_price) * rrRatio;
+    strategy.order(state.bull_order_id, 'LONG', {
+      limit: entry_price,
+      qty: qty,
+      qty_type: 'contracts',
+      reasoning: 'FVG Long entry at bottom edge ' + str.tostring(entry_price),
+    });
+    strategy.exit('Exit Long ' + state.bull_order_id, state.bull_order_id, {
+      stop: stop_loss_price,
+      limit: take_profit_price,
+      reasoning: 'FVG Long SL/TP',
+    });
+  }
+}
+
+// Mitigation for bullish FVG: if price closes above the top of the FVG, cancel pending buy order
+if (state.bullFVG_active && isFinite(state.bull_top) && +close > state.bull_top) {
+  if (state.bull_order_id !== '') {
+    strategy.cancel(state.bull_order_id);
+  }
+  state.bullFVG_active = false;
+  state.bull_top = NaN;
+  state.bull_bottom = NaN;
+  state.bull_mid = NaN;
+  state.bull_order_id = '';
+}
+
+// On new bearish FVG
+if (bearFVG_condition) {
+  if (state.bearFVG_active && state.bear_order_id !== '') {
+    strategy.cancel(state.bear_order_id);
+  }
+
+  state.bearFVG_active = true;
+  state.bear_top = low3;
+  state.bear_bottom = high1;
+  state.bear_mid = (state.bear_top + state.bear_bottom) / 2;
+
+  // Entry at far edge (top of bearish FVG) for deeper retracement
+  const entry_price: number = state.bear_top;
+  const stop_loss_price: number = state.bear_top * (1 + stopBuffer);
+  const stop_distance: number = stop_loss_price - entry_price;
+  const risk_capital: number = strategy.equity * riskPercent / 100;
+  const qty: number = stop_distance > 0 ? risk_capital / stop_distance : 0;
+
+  if (qty > 0) {
+    state.bear_order_id = 'BearFVG_S' + str.tostring(bar_index);
+    const take_profit_price: number = entry_price - (stop_loss_price - entry_price) * rrRatio;
+    strategy.order(state.bear_order_id, 'SHORT', {
+      limit: entry_price,
+      qty: qty,
+      qty_type: 'contracts',
+      reasoning: 'FVG Short entry at top edge ' + str.tostring(entry_price),
+    });
+    strategy.exit('Exit Short ' + state.bear_order_id, state.bear_order_id, {
+      stop: stop_loss_price,
+      limit: take_profit_price,
+      reasoning: 'FVG Short SL/TP',
+    });
+  }
+}
+
+// Mitigation for bearish FVG: close below the bottom
+if (state.bearFVG_active && isFinite(state.bear_bottom) && +close < state.bear_bottom) {
+  if (state.bear_order_id !== '') {
+    strategy.cancel(state.bear_order_id);
+  }
+  state.bearFVG_active = false;
+  state.bear_top = NaN;
+  state.bear_bottom = NaN;
+  state.bear_mid = NaN;
+  state.bear_order_id = '';
+}
+
+return null;

@@ -1,0 +1,106 @@
+//@version=5
+strategy("BTC FVG Retest Strategy", 
+     overlay=true, 
+     initial_capital=5000, 
+     commission_value=0.045,           // worst-case taker fee
+     commission_type=strategy.commission.percent,
+     default_qty_type=strategy.cash,
+     default_qty_value=5000,
+     process_orders_on_close=false)    // allows limit orders intra-bar
+
+// ── Inputs ──────────────────────────────────────────────
+emaLen       = input.int(50,        "EMA Length")
+atrLen       = input.int(14,        "ATR Period")
+atrMult      = input.float(1.5,     "ATR Multiplier for Stop", step=0.1)
+riskPerTrade = input.float(1.0,     "Risk per trade (%)", minval=0.1, maxval=5, step=0.1)
+rrRatio      = input.float(2.0,     "Risk/Reward ratio", minval=1.0)
+fvgLookback  = input.int(20,        "FVG Lookback (bars)")
+useEMA       = input.bool(true,     "Trend filter (EMA)")
+
+// ── Indicators ─────────────────────────────────────────
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrLen)
+
+// ── FVG Detection & Storage ────────────────────────────
+// Variables to store the most recent bullish / bearish FVG zone
+var float bullTop   = na
+var float bullBot   = na
+var float bearTop   = na
+var float bearBot   = na
+var int   bullBar   = na
+var int   bearBar   = na
+
+// Bullish FVG: candle[0] low > candle[2] high  → gap between high[2] and low[0]
+if low > high[2]
+    bullTop := high[2]
+    bullBot := low
+    bullBar := bar_index
+// Bearish FVG: candle[0] high < candle[2] low → gap between low[2] and high[0]
+if high < low[2]
+    bearTop := low[2]
+    bearBot := high    
+    bearBar := bar_index
+
+// Helper to check if an FVG is still fresh (within lookback bars)
+isFreshBullFVG = not na(bullTop) and (bar_index - bullBar) <= fvgLookback
+isFreshBearFVG = not na(bearTop) and (bar_index - bearBar) <= fvgLookback
+
+// ── Trade Conditions ───────────────────────────────────
+// Long: price retests a fresh bullish FVG from above, trend is up (or filter off)
+longCondition = false
+if isFreshBullFVG and (not useEMA or close > ema)
+    // price has just closed inside the FVG zone
+    insideZone = close <= bullTop and close >= bullBot
+    // previous bar closed outside (above) – meaning retest just began
+    retesting  = insideZone and close[1] > bullTop
+    longCondition := retesting
+
+// Short: price retests a fresh bearish FVG from below, trend is down
+shortCondition = false
+if isFreshBearFVG and (not useEMA or close < ema)
+    insideZone = close >= bearBot and close <= bearTop
+    retesting  = insideZone and close[1] < bearBot
+    shortCondition := retesting
+
+// ── Position Sizing ────────────────────────────────────
+// Calculate quantity based on risk per trade
+getQty(entryPrice, stopPrice) =>
+    riskEquity  = strategy.equity * riskPerTrade / 100.0
+    riskPerUnit = math.abs(entryPrice - stopPrice)
+    if riskPerUnit > 0
+        math.min(riskEquity / riskPerUnit, strategy.equity / entryPrice)
+    else
+        na
+
+// ── Entries & Exits ────────────────────────────────────
+if longCondition and strategy.position_size == 0
+    entryPrice = (bullTop + bullBot) / 2    // midline, maker-friendly limit
+    stopPrice  = bullBot - atrMult * atr
+    takePrice  = entryPrice + (entryPrice - stopPrice) * rrRatio
+    qty = getQty(entryPrice, stopPrice)
+    strategy.entry("Long", strategy.long, qty=qty, limit=entryPrice)
+    strategy.exit("Long Exit", "Long", stop=stopPrice, limit=takePrice)
+
+if shortCondition and strategy.position_size == 0
+    entryPrice = (bearTop + bearBot) / 2    // midline for short limit
+    stopPrice  = bearTop + atrMult * atr
+    takePrice  = entryPrice - (stopPrice - entryPrice) * rrRatio
+    qty = getQty(entryPrice, stopPrice)
+    strategy.entry("Short", strategy.short, qty=qty, limit=entryPrice)
+    strategy.exit("Short Exit", "Short", stop=stopPrice, limit=takePrice)
+
+// ── Visuals ────────────────────────────────────────────
+// Plot EMA
+plot(ema, "EMA 50", color=color.new(color.blue, 0), linewidth=2)
+
+// Highlight active FVG zones
+bgcolor(isFreshBullFVG ? color.new(color.green, 90) : na)
+bgcolor(isFreshBearFVG ? color.new(color.red, 90) : na)
+
+// Draw FVG boxes on the chart
+if isFreshBullFVG
+    box.new(left=bullBar, top=bullTop, right=bar_index, bottom=bullBot,
+         bgcolor=color.new(color.green, 85), border_color=color.green)
+if isFreshBearFVG
+    box.new(left=bearBar, top=bearTop, right=bar_index, bottom=bearBot,
+         bgcolor=color.new(color.red, 85), border_color=color.red)

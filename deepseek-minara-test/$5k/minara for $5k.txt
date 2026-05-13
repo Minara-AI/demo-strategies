@@ -1,0 +1,90 @@
+// strategy("FVG Retest Long", overlay=true, pyramiding=1)
+
+const fvgLookback = input.int(20, 'FVG Lookback', { minval: 2, maxval: 200 });
+const emaLen = input.int(50, 'EMA Length', { minval: 2, maxval: 200 });
+const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 100 });
+const atrMult = input.float(1.0, 'ATR Stop Mult', { minval: 0.1, maxval: 10, step: 0.1 });
+const rrRatio = input.float(2.5, 'Risk:Reward', { minval: 0.5, maxval: 10, step: 0.1 });
+const riskPct = input.float(2.0, 'Risk % per trade', { minval: 0.1, maxval: 10, step: 0.1 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 100 });
+const rsiMax = input.float(55, 'RSI Max (Dip Filter)', { minval: 20, maxval: 90, step: 1 });
+
+const ema50 = ta.ema(close, emaLen);
+const atr = ta.atr(atrLen);
+const rsi = ta.rsi(close, rsiLen);
+
+// Historical prices
+const high2 = high.at(2);
+const low2 = low.at(2);
+const curLow = +low;
+const curHigh = +high;
+const curClose = +close;
+const prevClose = close.at(1);
+const emaVal = +ema50;
+const atrVal = +atr;
+const rsiVal = +rsi;
+
+// --- Persistent state for FVG zones (state survives across bars) ---
+if (state.bullTop === undefined) state.bullTop = NaN;
+if (state.bullBot === undefined) state.bullBot = NaN;
+if (state.bullBar === undefined) state.bullBar = -1;
+
+// --- FVG Detection ---
+if (isFinite(high2) && isFinite(low2)) {
+  // Bullish FVG: current low > high[2]  →  void from high[2] to low[0]
+  if (curLow > high2) {
+    state.bullTop = curLow;
+    state.bullBot = high2;
+    state.bullBar = bar_index;
+  }
+}
+
+// Safety exit if essential data is missing
+if (!isFinite(emaVal) || !isFinite(atrVal) || !isFinite(prevClose) || !isFinite(rsiVal)) return null;
+
+// Only one trade at a time
+if (strategy.position_size !== 0) return null;
+
+const equity = strategy.equity;
+const riskEquity = equity * (riskPct / 100);
+
+// ---- LONG ENTRY ----
+const bullFresh = isFinite(state.bullTop)
+  && isFinite(state.bullBot)
+  && (bar_index - state.bullBar) <= fvgLookback
+  && (bar_index - state.bullBar) >= 1;
+
+if (bullFresh) {
+  const bullTop = state.bullTop;
+  const bullBot = state.bullBot;
+  const insideZone = curClose <= bullTop && curClose >= bullBot;
+  const prevAbove = prevClose > bullTop;
+  const trendOk = curClose > emaVal;
+  const rsiOk = rsiVal < rsiMax;
+  if (insideZone && prevAbove && trendOk && rsiOk) {
+    const entryPrice = (bullTop + bullBot) / 2;
+    const stopPrice = bullBot - atrVal * atrMult;
+    const riskPerUnit = entryPrice - stopPrice;
+    if (riskPerUnit > 0 && isFinite(entryPrice) && isFinite(stopPrice)) {
+      const tpPrice = entryPrice + riskPerUnit * rrRatio;
+      const qtyRisk = riskEquity / riskPerUnit;
+      const qtyCap = equity / entryPrice;
+      const qty = Math.min(qtyRisk, qtyCap);
+      if (qty > 0) {
+        strategy.entry('Long', 'LONG', {
+          qty: qty,
+          qty_type: 'contracts',
+          limit: entryPrice,
+          reasoning: 'Bullish FVG retest | EMA trend | RSI<' + rsiMax + ' | RR=' + rrRatio
+        });
+        strategy.exit('LongExit', 'Long', {
+          stop: stopPrice,
+          limit: tpPrice,
+          reasoning: 'FVG SL/TP'
+        });
+      }
+    }
+  }
+}
+
+return null;

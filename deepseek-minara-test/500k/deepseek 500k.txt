@@ -1,0 +1,176 @@
+//@version=6
+strategy("BTC 4h FVG/iFVG Automated Strategy", overlay=true, initial_capital=50000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.045)
+
+// ============================================
+// 1. User Inputs
+// ============================================
+riskPercent = input.float(1.0, "Risk per trade (%)", minval=0.5, maxval=2.0, step=0.25)
+atrMultiplierSL = input.float(1.75, "ATR stop multiplier", minval=1.0, maxval=3.0, step=0.25)
+atrLength = input.int(14, "ATR period")
+
+fvgLookback = input.int(20, "FVG lookback (bars)", minval=10, maxval=50)
+ceProximity = input.float(15.0, "CE proximity tolerance (%)", minval=5.0, maxval=30.0, step=2.5)
+
+useTrendFilter = input.bool(true, "Enable multi-timeframe trend filter")
+emaLong = input.int(50, "Long term EMA period (Weekly)")
+emaMedium = input.int(20, "Medium term EMA period (Daily)")
+
+// ============================================
+// 2. Helper Functions
+// ============================================
+isBullish(candle) => close[candle] > open[candle]
+isBearish(candle) => close[candle] < open[candle]
+
+// ============================================
+// 3. FVG Detection (Standard 3-candle definition)
+// ============================================
+detectBullishFVG() =>
+    low > high[2]
+
+detectBearishFVG() =>
+    high < low[2]
+
+getBullishFVGTop() => low
+getBullishFVGBottom() => high[2]
+getBearishFVGTop() => low[2]
+getBearishFVGBottom() => high
+
+// ============================================
+// 4. iFVG Detection
+// ============================================
+var float lastBullishFVGTop = na
+var float lastBullishFVGBottom = na
+var float lastBearishFVGTop = na
+var float lastBearishFVGBottom = na
+
+if detectBullishFVG()
+    lastBullishFVGTop := getBullishFVGTop()
+    lastBullishFVGBottom := getBullishFVGBottom()
+if detectBearishFVG()
+    lastBearishFVGTop := getBearishFVGTop()
+    lastBearishFVGBottom := getBearishFVGBottom()
+
+bearishIFVG = not na(lastBullishFVGTop) and close > lastBullishFVGTop and low < lastBullishFVGTop
+bullishIFVG = not na(lastBearishFVGTop) and close < lastBearishFVGBottom and high > lastBearishFVGBottom
+
+// ============================================
+// 5. Multi-Timeframe Trend Filter
+// ============================================
+weeklyEMA50 = request.security(syminfo.tickerid, "W", ta.ema(close, emaLong))
+dailyEMA20 = request.security(syminfo.tickerid, "D", ta.ema(close, emaMedium))
+
+weeklyTrendBullish = close > weeklyEMA50
+weeklyTrendBearish = close < weeklyEMA50
+dailyTrendBullish = close > dailyEMA20
+dailyTrendBearish = close < dailyEMA20
+
+trendBullish = useTrendFilter ? weeklyTrendBullish and dailyTrendBullish : true
+trendBearish = useTrendFilter ? weeklyTrendBearish and dailyTrendBearish : true
+
+// ============================================
+// 6. Consequent Encroachment (50% midpoint)
+// ============================================
+fvgMidPoint(top, bottom) => (top + bottom) / 2
+isPriceNearCE(price, fvgTop, fvgBottom, tolerance) =>
+    mid = fvgMidPoint(fvgTop, fvgBottom)
+    range = math.abs(fvgTop - fvgBottom)
+    threshold = range * tolerance / 100
+    math.abs(price - mid) <= threshold
+
+// ============================================
+// 7. ATR & Position Sizing
+// ============================================
+atrValue = ta.atr(atrLength)
+atrStopDistance = atrValue * atrMultiplierSL
+
+// ============================================
+// 8. Entry Signals
+// ============================================
+// Long signals
+bullishFVGSignal = detectBullishFVG()
+priceInBullishFVG = high > getBullishFVGBottom() and low < getBullishFVGTop()
+nearBullishFVGCE = isPriceNearCE(close, getBullishFVGTop(), getBullishFVGBottom(), ceProximity)
+
+longEntrySignal = bullishFVGSignal and priceInBullishFVG and nearBullishFVGCE and trendBullish
+
+// Short signals
+bearishFVGSignal = detectBearishFVG()
+priceInBearishFVG = high > getBearishFVGBottom() and low < getBearishFVGTop()
+nearBearishFVGCE = isPriceNearCE(close, getBearishFVGTop(), getBearishFVGBottom(), ceProximity)
+
+shortEntrySignal = bearishFVGSignal and priceInBearishFVG and nearBearishFVGCE and trendBearish
+
+// iFVG signals
+longiFVGEntry = bullishIFVG and trendBullish
+shortiFVGEntry = bearishIFVG and trendBearish
+
+// ============================================
+// 9. Trade Execution & Risk Management
+// ============================================
+volatilityAdjustedRisk = riskPercent
+if atrValue > 1200
+    volatilityAdjustedRisk := riskPercent * 0.75
+if atrValue < 500
+    volatilityAdjustedRisk := riskPercent * 1.0
+
+quantity = strategy.equity * volatilityAdjustedRisk / 100 / atrStopDistance
+
+stopLossLong = close - atrStopDistance
+stopLossShort = close + atrStopDistance
+
+if (longEntrySignal or longiFVGEntry) and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty=quantity)
+    strategy.exit("Long TP/SL", "Long", loss=stopLossLong, profit=close + atrStopDistance * 2.5)
+
+if (shortEntrySignal or shortiFVGEntry) and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=quantity)
+    strategy.exit("Short TP/SL", "Short", loss=stopLossShort, profit=close - atrStopDistance * 2.5)
+
+// Breakeven & trailing stop
+var float longBreakEvenTrigger = na
+var float shortBreakEvenTrigger = na
+
+if strategy.position_size > 0
+    if na(longBreakEvenTrigger)
+        longBreakEvenTrigger := close * 1.008
+    if close >= longBreakEvenTrigger
+        strategy.exit("Long BE", "Long", loss=strategy.position_avg_price * 1.0005)
+
+if strategy.position_size < 0
+    if na(shortBreakEvenTrigger)
+        shortBreakEvenTrigger := close * 0.992
+    if close <= shortBreakEvenTrigger
+        strategy.exit("Short BE", "Short", loss=strategy.position_avg_price * 0.9995)
+
+// ============================================
+// 10. Max Drawdown Protection (15%)
+// ============================================
+var float peakEquity = strategy.initial_capital
+peakEquity := math.max(peakEquity, strategy.equity)
+maxDrawdownPercent = (peakEquity - strategy.equity) / peakEquity * 100
+
+if maxDrawdownPercent >= 15
+    strategy.close_all(comment="Max drawdown 15% reached, trading paused")
+
+// ============================================
+// 11. Consecutive Losses Protection (5 losses)
+// ============================================
+var consecutiveLosses = 0
+if strategy.closetrades > 0
+    lastTrade = strategy.closetrades - 1
+    if strategy.closetrades > 0
+        if strategy.netprofit[1] < 0 and strategy.netprofit <= strategy.netprofit[1]
+            consecutiveLosses := consecutiveLosses + 1
+        else
+            consecutiveLosses := 0
+
+if consecutiveLosses >= 5
+    strategy.close_all(comment="5 consecutive losses, trading paused")
+
+// ============================================
+// 12. Visual Signals on Chart
+// ============================================
+plotshape(longEntrySignal or longiFVGEntry, title="Long Entry", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small)
+plotshape(shortEntrySignal or shortiFVGEntry, title="Short Entry", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+bgcolor(detectBullishFVG() ? color.new(color.green, 85) : detectBearishFVG() ? color.new(color.red, 85) : na)

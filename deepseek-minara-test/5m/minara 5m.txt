@@ -1,0 +1,109 @@
+// strategy("BTC 4H Institutional", overlay=true, initial_capital=5000000, pyramiding=1)
+
+// ----- Inputs -----
+const emaFastLen = input.int(21, 'Fast EMA', { minval: 5, maxval: 100 });
+const emaSlowLen = input.int(55, 'Slow EMA', { minval: 10, maxval: 200 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 100 });
+const rsiThreshold = input.int(50, 'RSI Threshold', { minval: 20, maxval: 80 });
+const adxLen = input.int(14, 'ADX Length', { minval: 2, maxval: 100 });
+const adxThreshold = input.int(20, 'ADX Threshold', { minval: 10, maxval: 50 });
+const volSmooth = input.int(20, 'Volume MA Length', { minval: 2, maxval: 200 });
+const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 100 });
+const stopATRMult = input.float(2.0, 'Stop ATR multiplier', { minval: 0.5, maxval: 10, step: 0.1 });
+const riskPerc = input.float(1.0, 'Risk per trade (%)', { minval: 0.1, maxval: 5, step: 0.1 });
+const takeProfitMult = input.float(2.5, 'Take profit risk multiple', { minval: 0.5, maxval: 10, step: 0.1 });
+const trailATRMult = input.float(3.0, 'Trailing stop ATR multiplier (after partial)', { minval: 0.5, maxval: 10, step: 0.1 });
+
+// ----- Indicators -----
+const emaFast = ta.ema(close, emaFastLen);
+const emaSlow = ta.ema(close, emaSlowLen);
+const rsi = ta.rsi(close, rsiLen);
+const adxObj = ta.dmi(adxLen);
+const adx = adxObj.adx;
+const volAvg = ta.sma(volume, volSmooth);
+const atrValue = ta.atr(atrLen);
+
+// ----- Trade signals -----
+const trendUp = +emaFast > +emaSlow;
+const trendDown = +emaFast < +emaSlow;
+const touchedFastEma = +low <= +emaFast;
+const rsiCrossUp = ta.crossover(rsi, rsiThreshold);
+const bearishCross = ta.crossunder(emaFast, emaSlow);
+
+const validAdx = +adx > adxThreshold;
+const validVol = +volume > +volAvg;
+
+const longCondition = trendUp && touchedFastEma && rsiCrossUp && validAdx && validVol;
+
+// ----- Position management state -----
+if (state.entryPrice === undefined) state.entryPrice = NaN;
+if (state.stopPrice === undefined) state.stopPrice = NaN;
+if (state.targetPrice === undefined) state.targetPrice = NaN;
+if (state.highestHigh === undefined) state.highestHigh = NaN;
+if (state.partialDone === undefined) state.partialDone = false;
+if (state.partialExecuted === undefined) state.partialExecuted = false;
+
+const atrNow = +atrValue;
+const closeNow = +close;
+const highNow = +high;
+const lowNow = +low;
+
+// ----- New long entry -----
+if (longCondition && strategy.position_size === 0 && isFinite(atrNow)) {
+  const entryPrice = closeNow;
+  const stopDist = atrNow * stopATRMult;
+  const stopPrice = entryPrice - stopDist;
+  const targetPrice = entryPrice + stopDist * takeProfitMult;
+  state.entryPrice = entryPrice;
+  state.stopPrice = stopPrice;
+  state.targetPrice = targetPrice;
+  state.partialDone = false;
+  state.partialExecuted = false;
+  state.highestHigh = entryPrice;
+  const riskAmount = strategy.equity * riskPerc / 100;
+  const qtyBTC = riskAmount / stopDist;
+  let cashOrder = qtyBTC * entryPrice;
+  cashOrder = Math.min(cashOrder, strategy.equity);
+  strategy.entry('Long', 'LONG', { qty: cashOrder, qty_type: 'cash' });
+}
+
+// ----- Exit management -----
+const longIsActive = strategy.position_size > 0;
+
+if (longIsActive) {
+  state.highestHigh = Math.max(isFinite(state.highestHigh) ? state.highestHigh : highNow, highNow);
+}
+
+const trailStopPrice = (isFinite(state.highestHigh) ? state.highestHigh : 0) - atrNow * trailATRMult;
+
+// Partial TP trigger: move stop to breakeven
+if (longIsActive && isFinite(state.targetPrice) && highNow >= state.targetPrice && !state.partialDone) {
+  state.partialDone = true;
+  state.stopPrice = state.entryPrice;
+}
+
+// After partial, raise stop with trailing
+if (state.partialDone && isFinite(trailStopPrice)) {
+  state.stopPrice = Math.max(state.stopPrice, trailStopPrice);
+}
+
+// ----- Partial TP 50% execution (one-shot) -----
+if (longIsActive && isFinite(state.targetPrice) && highNow >= state.targetPrice && state.partialDone && state.stopPrice === state.entryPrice) {
+  if (!state.partialExecuted) {
+    strategy.close('Long', { qty_percent: 50, reasoning: 'Partial TP 50%' });
+    state.partialExecuted = true;
+  }
+}
+
+// Full exit: stop hit or bearish cross
+if (longIsActive && (lowNow <= state.stopPrice || bearishCross)) {
+  strategy.close('Long', { reasoning: 'Exit' });
+  state.partialExecuted = false;
+  state.partialDone = false;
+  state.entryPrice = NaN;
+  state.stopPrice = NaN;
+  state.targetPrice = NaN;
+  state.highestHigh = NaN;
+}
+
+return null;

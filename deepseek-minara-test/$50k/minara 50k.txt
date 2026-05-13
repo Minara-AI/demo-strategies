@@ -1,0 +1,191 @@
+// strategy("BTC FVG iFVG", overlay=true, initial_capital=50000, pyramiding=1)
+
+// ==========================================================================
+// 1. INPUTS & PARAMETERS
+// ==========================================================================
+const risk_percent = input.float(1.0, 'Risk per trade (%)', { minval: 0.1, maxval: 10, step: 0.1 }) / 100;
+const atr_mult_sl = input.float(1.5, 'ATR multiplier for SL', { minval: 0.5, maxval: 5, step: 0.1 });
+const rr_ratio = input.float(3.0, 'Risk:Reward ratio (RR)', { minval: 0.5, maxval: 10, step: 0.1 });
+const ema_short_len = input.int(50, 'EMA short length', { minval: 2, maxval: 200 });
+const ema_long_len = input.int(200, 'EMA long length', { minval: 2, maxval: 500 });
+const rsi_len = input.int(14, 'RSI length', { minval: 2, maxval: 100 });
+const vol_mult = input.float(1.2, 'Volume multiplier (above SMA)', { minval: 0.5, maxval: 5, step: 0.1 });
+const fvg_min_width_pct = input.float(0.3, 'Min FVG width (%)', { minval: 0.05, maxval: 5, step: 0.05 }) / 100;
+
+// Source constant: default_qty_value (cash) from the PineScript header
+const INITIAL_CAPITAL = 50000;
+
+// ==========================================================================
+// 2. INDICATORS
+// ==========================================================================
+const ema_short = ta.ema(close, ema_short_len);
+const ema_long = ta.ema(close, ema_long_len);
+const rsi = ta.rsi(close, rsi_len);
+const vol_sma = ta.sma(volume, 20);
+const atr = ta.atr(14);
+
+const emaShortVal = +ema_short;
+const emaLongVal = +ema_long;
+const rsiVal = +rsi;
+const volSmaVal = +vol_sma;
+const atrVal = +atr;
+const closeVal = +close;
+const highVal = +high;
+const lowVal = +low;
+const volumeVal = +volume;
+
+if (!isFinite(emaShortVal) || !isFinite(emaLongVal) || !isFinite(rsiVal) ||
+    !isFinite(volSmaVal) || !isFinite(atrVal)) {
+  return null;
+}
+
+const trend_up = closeVal > emaLongVal && emaShortVal > emaLongVal;
+const trend_down = closeVal < emaLongVal && emaShortVal < emaLongVal;
+const volume_ok = volumeVal > volSmaVal * vol_mult;
+
+// ==========================================================================
+// 3. FVG DETECTION (3-candle pattern)
+// ==========================================================================
+// high[2] = high 2 bars ago, low[0] = current low
+const high2 = +high.at(2);
+const low2 = +low.at(2);
+const low0 = lowVal;
+const high0 = highVal;
+
+const bullish_fvg = isFinite(high2) && isFinite(low0) && high2 < low0;
+const bearish_fvg = isFinite(low2) && isFinite(high0) && low2 > high0;
+
+// var float fvg_buy_zone = na; var float fvg_sell_zone = na; var int fvg_bar_index = 0;
+if (state.fvg_buy_zone === undefined) state.fvg_buy_zone = NaN;
+if (state.fvg_sell_zone === undefined) state.fvg_sell_zone = NaN;
+if (state.fvg_bar_index === undefined) state.fvg_bar_index = 0;
+
+if (bullish_fvg) {
+  state.fvg_buy_zone = high2;
+  state.fvg_bar_index = bar_index;
+}
+
+if (bearish_fvg) {
+  state.fvg_sell_zone = low2;
+  state.fvg_bar_index = bar_index;
+}
+
+const fvg_fresh = bar_index - state.fvg_bar_index <= 20;
+
+const min_width = closeVal * fvg_min_width_pct;
+
+const valid_bull_fvg = bullish_fvg && (low0 - high2) >= min_width;
+const valid_bear_fvg = bearish_fvg && (low2 - high0) >= min_width;
+
+// ==========================================================================
+// 4. ENTRY CONDITIONS
+// ==========================================================================
+const enter_long = valid_bull_fvg && fvg_fresh && trend_up && rsiVal > 30 && volume_ok;
+const enter_short = valid_bear_fvg && fvg_fresh && trend_down && rsiVal < 70 && volume_ok;
+
+// ==========================================================================
+// 5. POSITION SIZING (1% risk of initial_capital)
+// ==========================================================================
+const risk_capital = INITIAL_CAPITAL * risk_percent;
+
+const position_size_long = (entry_price: number): number => {
+  const stop_loss = entry_price - (atrVal * atr_mult_sl);
+  if ((entry_price - stop_loss) > 0) {
+    return risk_capital / (entry_price - stop_loss);
+  }
+  return 0;
+};
+
+const position_size_short = (entry_price: number): number => {
+  const stop_loss = entry_price + (atrVal * atr_mult_sl);
+  if ((stop_loss - entry_price) > 0) {
+    return risk_capital / (stop_loss - entry_price);
+  }
+  return 0;
+};
+
+// ==========================================================================
+// 6. EXIT CONDITIONS (ATR-based TP/SL)
+// ==========================================================================
+const avgPrice = strategy.position_avg_price;
+const long_tp_price = avgPrice + (atrVal * atr_mult_sl * rr_ratio);
+const long_sl_price = avgPrice - (atrVal * atr_mult_sl);
+const short_tp_price = avgPrice - (atrVal * atr_mult_sl * rr_ratio);
+const short_sl_price = avgPrice + (atrVal * atr_mult_sl);
+
+// ==========================================================================
+// 7. ORDER EXECUTION
+// ==========================================================================
+if (enter_long && strategy.position_size === 0 && isFinite(state.fvg_buy_zone)) {
+  const entry_price = low0 > state.fvg_buy_zone ? low0 : state.fvg_buy_zone;
+  const size = position_size_long(entry_price);
+  if (size > 0) {
+    strategy.order('Long Entry', 'LONG', {
+      qty: size,
+      qty_type: 'contracts',
+      limit: entry_price,
+      reasoning: 'Bullish FVG',
+    });
+  }
+}
+
+if (enter_short && strategy.position_size === 0 && isFinite(state.fvg_sell_zone)) {
+  const entry_price = high0 < state.fvg_sell_zone ? high0 : state.fvg_sell_zone;
+  const size = position_size_short(entry_price);
+  if (size > 0) {
+    strategy.order('Short Entry', 'SHORT', {
+      qty: size,
+      qty_type: 'contracts',
+      limit: entry_price,
+      reasoning: 'Bearish iFVG',
+    });
+  }
+}
+
+if (strategy.position_size > 0) {
+  strategy.exit('Long Exit', 'Long Entry', {
+    stop: long_sl_price,
+    limit: long_tp_price,
+  });
+}
+
+if (strategy.position_size < 0) {
+  strategy.exit('Short Exit', 'Short Entry', {
+    stop: short_sl_price,
+    limit: short_tp_price,
+  });
+}
+
+// ==========================================================================
+// 8. VISUAL AIDS
+// ==========================================================================
+plot(ema_short, 'EMA 50', '#f59e0b', 1);
+plot(ema_long, 'EMA 200', '#3b82f6', 2);
+
+// Split bgcolor into two explicit calls to avoid 'string | undefined' type issue.
+if (enter_long) {
+  bgcolor('rgba(34,197,94,0.15)');
+}
+if (enter_short) {
+  bgcolor('rgba(239,68,68,0.15)');
+}
+
+// var box fvg_box = na
+if (state.fvg_box === undefined) state.fvg_box = null;
+
+if (valid_bull_fvg && fvg_fresh) {
+  if (state.fvg_box !== null) state.fvg_box.delete();
+  state.fvg_box = box.new(bar_index, high2, bar_index + 1, low0, {
+    bgcolor: 'rgba(34,197,94,0.2)',
+    border_color: '#22c55e',
+  });
+}
+if (valid_bear_fvg && fvg_fresh) {
+  if (state.fvg_box !== null) state.fvg_box.delete();
+  state.fvg_box = box.new(bar_index, low2, bar_index + 1, high0, {
+    bgcolor: 'rgba(239,68,68,0.2)',
+    border_color: '#ef4444',
+  });
+}
+
+return null;
