@@ -1,0 +1,143 @@
+strategy('SMSN Momentum', { overlay: true, pyramiding: 2 });
+
+const donchianLen = input.int(10, 'Donchian Length', { minval: 2, maxval: 100 });
+const emaFastLen = input.int(9, 'EMA Fast', { minval: 2, maxval: 50 });
+const emaMidLen = input.int(21, 'EMA Mid', { minval: 5, maxval: 100 });
+const emaSlowLen = input.int(50, 'EMA Slow', { minval: 10, maxval: 200 });
+const adxLen = input.int(14, 'ADX Length', { minval: 5, maxval: 50 });
+const adxThresh = input.int(20, 'ADX Threshold', { minval: 5, maxval: 50 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 50 });
+const rsiLow = input.int(45, 'RSI Low', { minval: 20, maxval: 60 });
+const rsiHigh = input.int(75, 'RSI High', { minval: 50, maxval: 95 });
+const volLen = input.int(20, 'Volume SMA Length', { minval: 5, maxval: 100 });
+const volMult = input.float(1.2, 'Volume Multiplier', { minval: 0.5, maxval: 5.0, step: 0.1 });
+const atrLen = input.int(14, 'ATR Length', { minval: 5, maxval: 50 });
+const slMult = input.float(1.5, 'SL ATR Mult', { minval: 0.5, maxval: 5.0, step: 0.1 });
+const tpMult = input.float(4.0, 'TP ATR Mult', { minval: 0.5, maxval: 10.0, step: 0.1 });
+const trailArmMult = input.float(2.0, 'Trail Arm ATR Mult', { minval: 0.5, maxval: 10.0, step: 0.1 });
+const trailOffsetMult = input.float(1.0, 'Trail Offset ATR Mult', { minval: 0.3, maxval: 5.0, step: 0.1 });
+
+const baseMarginPct = 25;
+
+const emaFast = ta.ema(close, emaFastLen);
+const emaMid = ta.ema(close, emaMidLen);
+const emaSlow = ta.ema(close, emaSlowLen);
+const rsi = ta.rsi(close, rsiLen);
+const adx = ta.adx(adxLen);
+const atr = ta.atr(atrLen);
+const volSma = ta.sma(volume, volLen);
+const donHigh = ta.highest(high, donchianLen);
+
+if (!isFinite(+emaFast) || !isFinite(+emaMid) || !isFinite(+emaSlow) || !isFinite(+rsi) || !isFinite(+adx) || !isFinite(+atr) || !isFinite(+volSma) || !isFinite(+donHigh)) {
+  return null;
+}
+
+const prevDonHigh = +donHigh.at(1);
+if (!isFinite(prevDonHigh)) return null;
+
+const bullStack = +emaFast > +emaMid && +emaMid > +emaSlow;
+const adxOk = +adx > adxThresh;
+const rsiOk = +rsi >= rsiLow && +rsi <= rsiHigh;
+const rsiPyramidOk = +rsi > rsiLow;
+const volOk = +volume > +volSma * volMult;
+const breakout = +close > prevDonHigh;
+
+const primarySignal = breakout && bullStack && adxOk && rsiOk && volOk;
+
+const pos = strategy.position_size;
+
+if (state.prevPos === undefined) state.prevPos = 0;
+if (state.entryPrice === undefined) state.entryPrice = 0;
+if (state.trailArmed === undefined) state.trailArmed = false;
+if (state.addCount === undefined) state.addCount = 0;
+if (state.prevClose === undefined) state.prevClose = +close;
+if (state.prevEmaFast === undefined) state.prevEmaFast = +emaFast;
+if (state.prevEmaMid === undefined) state.prevEmaMid = +emaMid;
+
+const prevClose = state.prevClose as number;
+const prevEmaFast = state.prevEmaFast as number;
+const prevEmaMid = state.prevEmaMid as number;
+
+const crossAboveEma9 = prevClose <= prevEmaFast && +close > +emaFast;
+const crossBelowEma21 = prevClose >= prevEmaMid && +close < +emaMid;
+
+if (pos <= 0) {
+  state.entryPrice = 0;
+  state.trailArmed = false;
+  state.addCount = 0;
+}
+
+if (pos > 0 && (state.prevPos as number) <= 0) {
+  state.entryPrice = +close;
+  state.trailArmed = false;
+  state.addCount = 0;
+}
+
+const inLong = pos > 0;
+const isProfitable = inLong && +close > (state.entryPrice as number);
+
+if (inLong && crossBelowEma21 && isProfitable) {
+  strategy.close_all({ reasoning: 'EMA21 dynamic exit (profitable)' });
+  state.prevPos = strategy.position_size;
+  state.prevClose = +close;
+  state.prevEmaFast = +emaFast;
+  state.prevEmaMid = +emaMid;
+  return null;
+}
+
+if (inLong && (state.trailArmed as boolean) === false) {
+  const armLevel = (state.entryPrice as number) + trailArmMult * +atr;
+  if (+close >= armLevel) {
+    const trailTicks = Math.max(1, Math.round((trailOffsetMult * +atr) / syminfo.mintick));
+    strategy.exit('Trail', 'long', { trail_points: trailTicks, reasoning: 'Trail armed' });
+    state.trailArmed = true;
+  }
+}
+
+if (inLong && primarySignal) {
+  strategy.close_all({ reasoning: 'Fresh breakout reset' });
+  strategy.entry('L1', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'Re-entry on fresh breakout',
+  });
+  const sl = +close - slMult * +atr;
+  const tp = +close + tpMult * +atr;
+  strategy.exit('Exit', 'long', { stop: sl, limit: tp, reasoning: 'Initial SL/TP' });
+  state.prevPos = strategy.position_size;
+  state.prevClose = +close;
+  state.prevEmaFast = +emaFast;
+  state.prevEmaMid = +emaMid;
+  return null;
+}
+
+if (!inLong && primarySignal) {
+  strategy.entry('L1', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'Donchian breakout + EMA stack + ADX + RSI + Vol',
+  });
+  const sl = +close - slMult * +atr;
+  const tp = +close + tpMult * +atr;
+  strategy.exit('Exit', 'long', { stop: sl, limit: tp, reasoning: 'Initial SL/TP' });
+  state.prevPos = strategy.position_size;
+  state.prevClose = +close;
+  state.prevEmaFast = +emaFast;
+  state.prevEmaMid = +emaMid;
+  return null;
+}
+
+if (inLong && (state.addCount as number) < 1 && crossAboveEma9 && rsiPyramidOk && adxOk) {
+  strategy.entry('L2', 'long', {
+    qty: baseMarginPct * 0.5 * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'Pyramid add-on: pullback to EMA9 bounce',
+  });
+  state.addCount = (state.addCount as number) + 1;
+}
+
+state.prevPos = strategy.position_size;
+state.prevClose = +close;
+state.prevEmaFast = +emaFast;
+state.prevEmaMid = +emaMid;
+return null;
