@@ -1,0 +1,121 @@
+// strategy('HYPE Trend & Fade', overlay=true, pyramiding=1, initial_capital=10000)
+
+// ====== Inputs ======
+const atrPeriod    = input.int(10,    'SuperTrend ATR Period',          { minval: 2,    maxval: 100 });
+const stFactor     = input.float(3.0, 'SuperTrend Factor',              { minval: 0.5,  maxval: 10.0, step: 0.1 });
+const rsiLen       = input.int(14,    'RSI Period',                     { minval: 2,    maxval: 100 });
+const emaLen       = input.int(50,    'Deviation EMA Period',           { minval: 2,    maxval: 200 });
+const rsiShortTh   = input.float(78,  'Short RSI Threshold',            { minval: 50,   maxval: 95,   step: 0.5 });
+const devShortTh   = input.float(0.08,'Short Deviation Threshold',      { minval: 0.01, maxval: 0.5,  step: 0.005 });
+const adxLen       = input.int(14,    'ADX Period',                     { minval: 2,    maxval: 100 });
+const adxTh        = input.float(20,  'ADX Filter Threshold',           { minval: 5,    maxval: 50,   step: 0.5 });
+const stDevShortTh = input.float(0.04,'SuperTrend Upper Deviation Short Threshold', { minval: 0.005, maxval: 0.3, step: 0.005 });
+const shortSlPct   = input.float(0.02,'Short Stop-Loss %',              { minval: 0.005,maxval: 0.1,  step: 0.001 });
+const longTrailPct = input.float(0.03,'Long Trailing Stop %',           { minval: 0.005,maxval: 0.2,  step: 0.001 });
+
+// Long: 100% margin / Short: 50% margin (half of long size). Leverage injected by engine.
+// At 5x: notional = 500% / 250% of equity.
+const longMarginPct  = 100;
+const shortMarginPct = 50;
+
+// ====== State Init (must be at the top) ======
+if (state.shortEntryPrice  === undefined) state.shortEntryPrice  = 0;
+if (state.longHighestPrice === undefined) state.longHighestPrice = 0;
+if (state.prevPos          === undefined) state.prevPos          = 0;
+
+// ====== Indicators ======
+const st    = ta.supertrend(stFactor, atrPeriod);
+const rsi   = ta.rsi(close, rsiLen);
+const ema50 = ta.ema(close, emaLen);
+const adx   = ta.adx(adxLen).adx;
+
+// SuperTrend direction: -1 = bullish, 1 = bearish
+const dirNow  = +st.direction;
+const dirPrev = +st.direction.at(1);
+const stVal   = +st.value;
+
+// Data validity check
+if (!isFinite(stVal) || !isFinite(+rsi) || !isFinite(+ema50) || !isFinite(+adx) || !isFinite(dirNow) || !isFinite(dirPrev)) {
+  return null;
+}
+
+// ====== Signals ======
+const stFlipBull = dirPrev ===  1 && dirNow === -1;  // Flip from bearish to bullish
+const stFlipBear = dirPrev === -1 && dirNow ===  1;  // Flip from bullish to bearish
+
+const dev          = (+close - +ema50) / +ema50;
+const rsiTopSignal = +rsi > rsiShortTh && dev > devShortTh;
+
+// SuperTrend upper-deviation short signal: only valid when SuperTrend is bullish (direction === -1)
+// AND price is 4%+ above the ST line (overheated).
+const stDevAbove        = (+close - stVal) / stVal;
+const stDevShortSignal  = dirNow === -1 && stDevAbove > stDevShortTh;
+
+// Either top-fishing / overheated signal triggers a short
+const shortSignal = rsiTopSignal || stDevShortSignal;
+
+const pos       = strategy.position_size;
+const prevPos   = state.prevPos;
+const adxStrong = +adx > adxTh;
+
+// While long, track the highest price (for trailing stop)
+if (pos > 0) {
+  if (state.longHighestPrice <= 0) {
+    state.longHighestPrice = +close;
+  } else {
+    state.longHighestPrice = Math.max(state.longHighestPrice, +close);
+  }
+}
+
+// ====== Trading Logic ======
+
+// A0) Long trailing stop (HIGHEST priority): if holding long AND price has retraced
+// more than longTrailPct (3%) from the highest point → close long, do NOT open short.
+if (pos > 0 && state.longHighestPrice > 0 && +close <= state.longHighestPrice * (1 - longTrailPct)) {
+  strategy.close('Long', {
+    reasoning: 'Long trailing stop triggered: price (' + str.tostring(+close, '#.##') +
+               ') retraced from high (' + str.tostring(state.longHighestPrice, '#.##') +
+               ') by more than ' + str.tostring(longTrailPct * 100, '#.##') + '%',
+  });
+  state.longHighestPrice = 0;
+  state.prevPos = pos;
+  return null;
+}
+
+// A) Short stop-loss backstop: if holding short AND price has risen above entry by shortSlPct (2%)
+// → close short + IMMEDIATELY flip long.
+// (strategy.exit already attached a stop at entry bar; this is a double safety net
+//  against gaps or slippage that may prevent the stop from filling cleanly.)
+if (pos < 0 && state.shortEntryPrice > 0 && +close >= state.shortEntryPrice * (1 + shortSlPct)) {
+  strategy.close('Short', {
+    reasoning: 'Short stop-loss triggered: price (' + str.tostring(+close, '#.##') +
+               ') rose above entry (' + str.tostring(state.shortEntryPrice, '#.##') +
+               ') by ' + str.tostring(shortSlPct * 100, '#.##') + '%',
+  });
+  strategy.entry('Long', 'long', {
+    qty: longMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'Flipping long after short stop-out',
+  });
+  state.shortEntryPrice  = 0;
+  state.longHighestPrice = +close;
+  state.prevPos = pos;
+  return null;
+}
+
+// B) Short entry (highest signal priority): RSI top-fishing OR price 4%+ above SuperTrend
+// (overheated) — no ADX filter applied here.
+if (shortSignal && pos >= 0) {
+  if (pos > 0) {
+    strategy.close('Long', {
+      reasoning: stDevShortSignal
+        ? 'Price 4%+ above SuperTrend — overheated reversal, closing long first'
+        : 'RSI>78 with deviation>8% — top-fishing short signal, closing long first',
+    });
+    state.longHighestPrice = 0;
+  }
+  const reasonStr = stDevShortSignal
+    ? 'Price above SuperTrend (' + str.tostring(stVal, '#.##') + ') by ' +
+      str.tostring(stDevAbove * 100, '#.##') + '% (>4%) — overheated short'
+    : 'RSI (' + str.tostring(+rsi, '#.##') + ') > 78 and deviation (' +
+      str.tostring(dev * 100, '#.##') + '%) > 8% — top-fishing short';
