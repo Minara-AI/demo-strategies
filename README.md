@@ -11,5 +11,7 @@ Trading strategies written in pine-runtime, Minara Strategy Studio's TypeScript 
 | NVDA | 4h | EMA (9/21/50), RSI, ATR | [NVDA-100%-APY.txt](NVDA-100%25-APY.txt) |
 | SMSN (Samsung) | 4h | Donchian, EMA (9/21/50), RSI, ADX, ATR | [SMSN-34%.txt](SMSN-34%25.txt) |
 | HYPE | 4h | SuperTrend, RSI, EMA, ADX | [HYPE-175%.txt](HYPE-175%25.txt) |
+| ZEC | 4h | SuperTrend, RSI, ATR, volume breakout | [ZEC-228%.txt](ZEC-228%25.txt) |
+| CRCL (Circle) | 4h | EMA (9/20/50), RSI, ADX, ATR | [CRCL-125%.txt](CRCL-125%25.txt) |
 
 The percentage in each filename is the headline return from the original 4h backtest. Re-run with your own date range, fees, and leverage before relying on it.
