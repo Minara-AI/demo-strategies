@@ -1,0 +1,81 @@
+strategy('ZEC ST Breakout', { overlay: true });
+
+// === Inputs ===
+const stAtrPeriod = input.int(10, 'SuperTrend ATR Period', { minval: 2, maxval: 100 });
+const stFactor = input.float(2.0, 'SuperTrend Factor', { minval: 0.5, maxval: 10, step: 0.1 });
+const breakoutLen = input.int(10, 'Breakout Lookback', { minval: 2, maxval: 200 });
+const volLen = input.int(20, 'Volume MA Length', { minval: 2, maxval: 200 });
+const volMult = input.float(1.5, 'Volume Surge Multiplier', { minval: 0.5, maxval: 10, step: 0.1 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 100 });
+const rsiMin = input.float(45, 'RSI Minimum', { minval: 5, maxval: 95, step: 1 });
+const atrLen = input.int(14, 'ATR Length (Trail)', { minval: 2, maxval: 100 });
+const trailMult = input.float(1.8, 'ATR Trail Multiplier', { minval: 0.5, maxval: 10, step: 0.1 });
+
+const baseMarginPct = 9; // 9% margin × 10x leverage = 90% equity notional
+
+// === Indicators ===
+const st = ta.supertrend(stFactor, stAtrPeriod);
+const dir = +st.direction;        // -1 bullish, +1 bearish (Pine v6)
+const prevDir = +st.direction.at(1);
+
+const hh = ta.highest(high, breakoutLen);
+const prevHH = +hh.at(1);          // breakout vs PRIOR N-bar high (exclude current bar)
+
+const volMa = ta.sma(volume, volLen);
+const rsi = ta.rsi(close, rsiLen);
+const atr = ta.atr(atrLen);
+
+// Guard: need history
+if (!isFinite(+st.value) || !isFinite(prevHH) || !isFinite(+volMa) || !isFinite(+rsi) || !isFinite(+atr)) {
+  return null;
+}
+
+// === State ===
+if (state.peakClose === undefined) state.peakClose = 0;
+if (state.prevPos === undefined) state.prevPos = 0;
+
+const pos = strategy.position_size;
+
+// === Entry: long only ===
+const stBullish = dir === -1;
+const breakout = +close > prevHH;
+const volSurge = +volume >= +volMa * volMult;
+const rsiOk = +rsi > rsiMin;
+
+const longCond = stBullish && breakout && volSurge && rsiOk && pos <= 0;
+
+if (longCond) {
+  strategy.entry('L', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'SuperTrend bullish + 10-bar breakout + volume surge + RSI>45',
+  });
+}
+
+// === Track peak close since entry ===
+const justEnteredLong = pos > 0 && state.prevPos <= 0;
+if (justEnteredLong) {
+  state.peakClose = +close;
+} else if (pos > 0) {
+  if (+close > state.peakClose) state.peakClose = +close;
+} else {
+  state.peakClose = 0;
+}
+
+// === Exits ===
+if (pos > 0) {
+  // 1) SuperTrend flip to bearish
+  const stFlipBear = dir === 1 && prevDir === -1;
+  if (stFlipBear) {
+    strategy.close_all({ reasoning: 'SuperTrend flipped bearish' });
+  } else {
+    // 2) ATR trailing stop from peak close (tightened to 1.8x)
+    const trailStop = state.peakClose - trailMult * +atr;
+    if (+close < trailStop) {
+      strategy.close_all({ reasoning: 'ATR trailing stop hit (close < peak - 1.8*ATR)' });
+    }
+  }
+}
+
+state.prevPos = pos;
+return null;
