@@ -1,0 +1,83 @@
+// strategy("EMA Pullback Long", overlay=true, pyramiding=1)
+const emaMacroLen = input.int(50, 'Macro EMA', { minval: 20, maxval: 200 });
+const emaTrendLen = input.int(20, 'Trend EMA', { minval: 5, maxval: 100 });
+const emaFastLen = input.int(9, 'Fast EMA', { minval: 2, maxval: 50 });
+const rsiLen = input.int(14, 'RSI Length', { minval: 2, maxval: 50 });
+const rsiLongMin = input.int(35, 'RSI Long Min', { minval: 20, maxval: 60 });
+const rsiLongMax = input.int(68, 'RSI Long Max', { minval: 55, maxval: 90 });
+const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 50 });
+const adxLen = input.int(14, 'ADX Length', { minval: 5, maxval: 50 });
+const adxThreshold = input.float(20, 'ADX Threshold', { minval: 5, maxval: 50, step: 1 });
+const pullbackLookback = input.int(3, 'Pullback Lookback Bars', { minval: 1, maxval: 10 });
+const pullbackTol = input.float(0.005, 'Pullback Tolerance (frac)', { minval: 0.0, maxval: 0.05, step: 0.001 });
+const slMult = input.float(1.0, 'SL ATR Mult', { minval: 0.5, maxval: 5.0, step: 0.1 });
+const tpMult = input.float(3.5, 'TP ATR Mult', { minval: 0.5, maxval: 10.0, step: 0.1 });
+const trailActivateMult = input.float(1.2, 'Trail Activate ATR Mult', { minval: 0.5, maxval: 5.0, step: 0.1 });
+const trailOffsetMult = input.float(0.5, 'Trail Offset ATR Mult', { minval: 0.3, maxval: 5.0, step: 0.1 });
+const minVolatility = input.float(0.012, 'Min ATR/Close Ratio', { minval: 0.001, maxval: 0.1, step: 0.001 });
+
+const baseMarginPct = 10;
+
+const emaMacro = ta.ema(close, emaMacroLen);
+const emaTrend = ta.ema(close, emaTrendLen);
+const emaFast = ta.ema(close, emaFastLen);
+const rsi = ta.rsi(close, rsiLen);
+const atr = ta.atr(atrLen);
+const adx = ta.adx(adxLen);
+
+if (!isFinite(+emaMacro) || !isFinite(+emaTrend) || !isFinite(+emaFast) || !isFinite(+rsi) || !isFinite(+atr) || !isFinite(+adx.adx)) return null;
+
+const atrVal = +atr;
+const closeVal = +close;
+const rsiVal = +rsi;
+const emaFastVal = +emaFast;
+const adxVal = +adx.adx;
+
+const volatilityOk = atrVal / closeVal > minVolatility;
+const uptrend = closeVal > +emaMacro && closeVal > +emaTrend;
+const rsiOk = rsiVal >= rsiLongMin && rsiVal <= rsiLongMax;
+const adxOk = adxVal > adxThreshold;
+
+let pulledBack = false;
+for (let i = 0; i < pullbackLookback; i++) {
+  const lowI = +low.at(i);
+  const emaFastI = +emaFast.at(i);
+  if (isFinite(lowI) && isFinite(emaFastI) && lowI <= emaFastI * (1 + pullbackTol)) {
+    pulledBack = true;
+    break;
+  }
+}
+
+const bounceOk = closeVal > emaFastVal;
+
+const longCond = uptrend && rsiOk && volatilityOk && adxOk && pulledBack && bounceOk;
+
+const pos = strategy.position_size;
+const inPos = Math.abs(pos) > 1e-9;
+const prevPos = state.prevPos === undefined ? 0 : state.prevPos;
+
+if (!inPos && longCond) {
+  strategy.entry('L', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'Long pullback: close>EMA50/EMA20, bounce off EMA9, RSI ' + rsiVal.toFixed(1) + ', ADX ' + adxVal.toFixed(1) + ', ATR/close ' + (atrVal / closeVal).toFixed(4)
+  });
+}
+
+const justEnteredLong = pos > 1e-9 && prevPos <= 1e-9;
+
+if (justEnteredLong) {
+  const entryPx = +strategy.position_avg_price;
+  const sl = entryPx - atrVal * slMult;
+  const tp = entryPx + atrVal * tpMult;
+  strategy.exit('XL', 'L', {
+    stop: sl,
+    limit: tp,
+    trail_price: entryPx + atrVal * trailActivateMult,
+    trail_offset: Math.round(atrVal * trailOffsetMult / syminfo.mintick),
+    reasoning: 'SL 1.0x ATR / TP 3.5x ATR / Trail activate 1.2x ATR offset 0.5x'
+  });
+}
+
+state.prevPos = pos;
+return null;
