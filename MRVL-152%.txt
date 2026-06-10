@@ -1,0 +1,91 @@
+;(() => {
+strategy("EMA Trend Ride", { pyramiding: 1 });
+const fastLen = input.int(5, 'Fast EMA', { minval: 2, maxval: 50 });
+const slowLen = input.int(15, 'Slow EMA', { minval: 3, maxval: 100 });
+const trendLen = input.int(20, 'Trend EMA', { minval: 5, maxval: 200 });
+const adxLen = input.int(10, 'ADX Length', { minval: 5, maxval: 50 });
+const adxThresh = input.float(25, 'ADX Threshold', { minval: 5, maxval: 50, step: 0.5 });
+const slopeLookback = input.int(5, 'Slope Lookback', { minval: 1, maxval: 30 });
+const rsiLen = input.int(7, 'RSI Length', { minval: 2, maxval: 50 });
+const rsiThresh = input.float(50, 'RSI Threshold', { minval: 30, maxval: 80, step: 0.5 });
+const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 50 });
+const atrMult = input.float(2.5, 'ATR Trail Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+const baseMarginPct = 70;
+if (state.prevPos === undefined) state.prevPos = 0;
+const fast = ta.ema(close, fastLen);
+const slow = ta.ema(close, slowLen);
+const trend = ta.ema(close, trendLen);
+const adxVal = ta.adx(adxLen);
+const rsiVal = ta.rsi(close, rsiLen);
+const atrVal = ta.atr(atrLen);
+if (!isFinite(+fast) || !isFinite(+slow) || !isFinite(+trend) || !isFinite(+adxVal) || !isFinite(+rsiVal) || !isFinite(+atrVal)) {
+  state.prevPos = +strategy.position_size;
+  return null;
+}
+const trendPrev = trend.at(slopeLookback);
+if (!isFinite(+trendPrev)) {
+  state.prevPos = +strategy.position_size;
+  return null;
+}
+const slopeUp = +trend > +trendPrev;
+const slopeDown = +trend < +trendPrev;
+const adxOk = +adxVal > adxThresh;
+const rsiLongOk = +rsiVal > rsiThresh;
+const rsiShortOk = +rsiVal < (100 - rsiThresh);
+const longCross = ta.crossover(fast, slow);
+const shortCross = ta.crossunder(fast, slow);
+const longEntry = longCross && adxOk && +close > +trend && slopeUp && rsiLongOk;
+const shortEntry = shortCross && adxOk && +close < +trend && slopeDown && rsiShortOk;
+const pos = +strategy.position_size;
+const prevPos = state.prevPos as number;
+// Exit long on opposite cross
+if (pos > 0 && shortCross) {
+  strategy.close_all({ reasoning: 'long exit: EMA5 crossed below EMA15' });
+  state.prevPos = pos;
+  return null;
+}
+// Exit short on opposite cross
+if (pos < 0 && longCross) {
+  strategy.close_all({ reasoning: 'short exit: EMA5 crossed above EMA15' });
+  state.prevPos = pos;
+  return null;
+}
+if (longEntry && pos <= 0) {
+  strategy.entry('L', 'long', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'EMA5>EMA15 cross, ADX>thr, close>EMA20, slope up, RSI7>thr',
+  });
+  state.prevPos = pos;
+  return null;
+}
+if (shortEntry && pos >= 0) {
+  strategy.entry('S', 'short', {
+    qty: baseMarginPct * strategy.leverage,
+    qty_type: 'percent_of_equity',
+    reasoning: 'EMA5<EMA15 cross, ADX>thr, close<EMA20, slope down, RSI7<(100-thr)',
+  });
+  state.prevPos = pos;
+  return null;
+}
+// Attach ATR trailing stop ONLY on the bar position flips (avoid stacking — see C13)
+const justEnteredLong = pos > 0 && prevPos <= 0;
+const justEnteredShort = pos < 0 && prevPos >= 0;
+const trailTicks = Math.max(1, Math.round((atrMult * +atrVal) / syminfo.mintick));
+if (justEnteredLong) {
+  strategy.exit('XL', 'L', {
+    trail_price: +close,
+    trail_offset: trailTicks,
+    reasoning: 'ATR(14) x2.5 trailing stop on long',
+  });
+}
+if (justEnteredShort) {
+  strategy.exit('XS', 'S', {
+    trail_price: +close,
+    trail_offset: trailTicks,
+    reasoning: 'ATR(14) x2.5 trailing stop on short',
+  });
+}
+state.prevPos = pos;
+return null;
+})();
