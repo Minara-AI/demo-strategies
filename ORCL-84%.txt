@@ -1,0 +1,94 @@
+;(() => {
+  strategy('MACD ADX CTA');
+
+  // === Inputs ===
+  const macdFast = input.int(12, 'MACD Fast', { minval: 2, maxval: 100 });
+  const macdSlow = input.int(26, 'MACD Slow', { minval: 2, maxval: 200 });
+  const macdSignal = input.int(9, 'MACD Signal', { minval: 2, maxval: 100 });
+  const adxLen = input.int(14, 'ADX Length', { minval: 2, maxval: 100 });
+  const adxThreshold = input.float(20, 'ADX Threshold', { minval: 5, maxval: 50, step: 1 });
+  const atrLen = input.int(14, 'ATR Length', { minval: 2, maxval: 100 });
+  const atrSlMult = input.float(2.0, 'ATR Stop Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+  const atrTpMult = input.float(3.0, 'ATR Profit Mult', { minval: 0.5, maxval: 10, step: 0.1 });
+  const emaFastLen = input.int(20, 'EMA Fast', { minval: 2, maxval: 200 });
+  const emaSlowLen = input.int(50, 'EMA Slow', { minval: 2, maxval: 200 });
+  const baseMarginPct = 20; // 20% margin * 5x leverage = 100% equity notional
+
+  // === Indicators ===
+  const macd = ta.macd(close, macdFast, macdSlow, macdSignal);
+  const macdLine = macd.macd;
+  const sigLine = macd.signal;
+  const hist = macd.histogram;
+
+  const dmi = ta.adx(adxLen);
+  const adxVal = dmi.adx;
+
+  const emaFast = ta.ema(close, emaFastLen);
+  const emaSlow = ta.ema(close, emaSlowLen);
+
+  const atrVal = ta.atr(atrLen);
+
+  // === Validity guard ===
+  if (!isFinite(+macdLine) || !isFinite(+sigLine) || !isFinite(+hist)) return null;
+  if (!isFinite(+adxVal) || !isFinite(+atrVal)) return null;
+  if (!isFinite(+emaFast) || !isFinite(+emaSlow)) return null;
+
+  // === Signal conditions ===
+  const crossUp = ta.crossover(macdLine, sigLine);
+  const crossDn = ta.crossunder(macdLine, sigLine);
+
+  const histPrev = +hist.at(1);
+  const histTurnPos = isFinite(histPrev) && histPrev <= 0 && +hist > 0;
+  const histTurnNeg = isFinite(histPrev) && histPrev >= 0 && +hist < 0;
+
+  const trendUp = +emaFast > +emaSlow;
+  const trendDn = +emaFast < +emaSlow;
+  const adxOk = +adxVal > adxThreshold;
+
+  const longSignal = crossUp && adxOk && (histTurnPos || +hist > 0) && trendUp;
+  const shortSignal = crossDn && adxOk && (histTurnNeg || +hist < 0) && trendDn;
+
+  const pos = +strategy.position_size;
+  const prevPos = state.prevPos === undefined ? 0 : (state.prevPos as number);
+
+  // === Entries (with reversal) ===
+  if (longSignal) {
+    if (pos < 0) {
+      strategy.close_all({ reasoning: 'Reverse to long on MACD bull cross' });
+    }
+    strategy.entry('L', 'long', {
+      qty: baseMarginPct * strategy.leverage,
+      qty_type: 'percent_of_equity',
+      reasoning: 'MACD cross up + ADX>thr + hist>0 + EMA20>EMA50',
+    });
+  } else if (shortSignal) {
+    if (pos > 0) {
+      strategy.close_all({ reasoning: 'Reverse to short on MACD bear cross' });
+    }
+    strategy.entry('S', 'short', {
+      qty: baseMarginPct * strategy.leverage,
+      qty_type: 'percent_of_equity',
+      reasoning: 'MACD cross down + ADX>thr + hist<0 + EMA20<EMA50',
+    });
+  }
+
+  // === ATR stop/target — only set on the bar position is opened ===
+  const justEnteredLong = pos > 0 && prevPos <= 0;
+  const justEnteredShort = pos < 0 && prevPos >= 0;
+
+  if (justEnteredLong) {
+    const entryPx = +close;
+    const sl = entryPx - atrSlMult * +atrVal;
+    const tp = entryPx + atrTpMult * +atrVal;
+    strategy.exit('XL', 'L', { stop: sl, limit: tp, reasoning: 'ATR SL/TP long' });
+  }
+  if (justEnteredShort) {
+    const entryPx = +close;
+    const sl = entryPx + atrSlMult * +atrVal;
+    const tp = entryPx - atrTpMult * +atrVal;
+    strategy.exit('XS', 'S', { stop: sl, limit: tp, reasoning: 'ATR SL/TP short' });
+  }
+
+  state.prevPos = pos;
+  return null;
+})();
